@@ -1,0 +1,26 @@
+# ERLA source authority defaults (packaged template).
+# A site override at <ERLA data folder>/config/source_authority.yaml replaces this file.
+# Tiers: T1 standards/specs/allowables, T2 handbooks/peer-reviewed, T3 textbooks/reports,
+#        T4 trusted OEM/vendor, T5 internal/unverified, T6 forums/wikis.
+tiers:
+  T1: [astm.org, asme.org, sae.org, iso.org, ansi.org, api.org, aws.org,
+       standards.nasa.gov, quicksearch.dla.mil, eurocodes.jrc.ec.europa.eu]
+  T2: [ntrs.nasa.gov, dtic.mil, nist.gov, osti.gov, asminternational.org, esdu.com,
+       sciencedirect.com, springer.com, asmedigitalcollection.asme.org, onlinelibrary.wiley.com]
+  T4: []                  # add OEM/vendor domains you trust
+  T6: [eng-tips.com, reddit.com, stackexchange.com, wikipedia.org]
+publisher_patterns:
+  T1: ["ASTM International", "ASME", "SAE International", "Battelle (MMPDS)", "Department of Defense"]
+  T2: ["NASA", "NIST", "ASM International", "ESDU", "Wiley", "McGraw-Hill", "Elsevier", "Springer"]
+folder_hints:             # top-level library folder name -> default tier / discipline.
+  # Replace these examples with the top-level folder names of YOUR library.
+  "Standards": {tier: T1}
+  "Handbooks": {tier: T2}
+  "Textbooks": {tier: T2}
+  "Materials": {discipline: materials}
+  "Fatigue": {discipline: fatigue}
+  "Joints": {discipline: joints}
+  "Composites": {discipline: composites}
+  "Buckling": {discipline: stability}
+  "FEA": {discipline: fea}
+  "Internal": {tier: T5}

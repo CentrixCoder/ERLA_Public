@@ -1,0 +1,51 @@
+name: Release
+
+# A tag such as v0.3.5 (pushed by the private ERLA release, or by hand) builds erla-plugin.zip from
+# plugins/erla and publishes it as the latest release. The zip name never changes, so
+# https://github.com/CentrixCoder/ERLA_Public/releases/latest/download/erla-plugin.zip always works.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag matches the plugin version
+        run: python scripts/check_public.py . --tag "$GITHUB_REF_NAME"
+      - name: Build erla-plugin.zip
+        run: |
+          cd plugins/erla
+          zip -qr -X ../../erla-plugin.zip . -x '*__pycache__*'
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          cat > notes.md <<EOF
+          ERLA $ver, the Engineering Research Library Agent.
+
+          **Claude app (desktop or claude.ai):** download \`erla-plugin.zip\` below, then Plugins → + Add → Upload.
+
+          **Claude Code:**
+          \`\`\`
+          /plugin marketplace add CentrixCoder/ERLA_Public
+          /plugin install erla@erla-tools
+          \`\`\`
+          Already installed? \`/plugin marketplace update erla-tools\`, then run \`/erla:setup\`.
+
+          Full instructions: [README](https://github.com/CentrixCoder/ERLA_Public#readme)
+          EOF
+          gh release create "$GITHUB_REF_NAME" erla-plugin.zip \
+            --title "ERLA $ver" --notes-file notes.md --latest

@@ -1,0 +1,13 @@
+# ERLA golden queries for THIS site. Replace the examples with 30+ queries whose
+# expected documents exist in your library (rules/skills S14). expect_docs = substring
+# of title or path; expect_value = a value that must appear in the cited text.
+- id: Q001
+  query: "7075-T651 plate Fty L direction B-basis 1.0 in thick"
+  expect_docs: ["MMPDS"]
+  expect_value: null
+- id: Q002
+  query: "Kt shoulder fillet round bar bending r/d 0.1 D/d 1.5"
+  expect_docs: ["Peterson"]
+- id: Q003
+  query: "bracket model SOL 103 first mode"
+  expect_docs: [".f06"]

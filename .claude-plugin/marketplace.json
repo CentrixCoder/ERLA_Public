@@ -1,0 +1,18 @@
+{
+  "name": "erla-tools",
+  "owner": {
+    "name": "ERLA maintainers"
+  },
+  "description": "ERLA - Engineering Research Library Agent for local engineering libraries",
+  "version": "0.3.5",
+  "plugins": [
+    {
+      "name": "erla",
+      "source": "./plugins/erla",
+      "description": "Engineering Research Library Agent: local library search with traceable Result Packets",
+      "category": "engineering",
+      "license": "MIT",
+      "homepage": "https://github.com/CentrixCoder/ERLA_Public"
+    }
+  ]
+}

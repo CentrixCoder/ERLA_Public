@@ -1,0 +1,20 @@
+{
+  "modules": ["./register.tsx"],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "WebSearch|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": ["run", "--no-project", "--quiet", "--python", ">=3.11", "${CLAUDE_PLUGIN_ROOT}/scripts/webgate.py"],
+            "timeout": 30,
+            "onFailure": "block",
+            "statusMessage": "ERLA: checking the web request for restricted terms"
+          }
+        ]
+      }
+    ]
+  }
+}
