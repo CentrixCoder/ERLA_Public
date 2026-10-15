@@ -444,7 +444,9 @@ JOINT_CALC_REQUIRED = re.compile(r"joint (?:stiffness )?constant|stiffness (?:co
                                  r"thermal preload|weld (?:group|throat)|throat (?:shear )?stress|volkersen|shear[- ]lag|"
                                  r"\blug (?:bearing|net[- ]section|ultimate|transverse|oblique|allowable|strength)|"
                                  r"pin bending|weak[- ]pin|bearing[- ]bypass|bypass (?:intercept|allowable)|"
-                                 r"goland|reissner|bending[- ]moment factor", re.I)
+                                 r"goland|reissner|bending[- ]moment factor|"
+                                 r"elastic[- ]plastic (?:adhesive )?shear|potential (?:adhesive )?shear strength|"
+                                 r"single[- ]lap (?:joint |bond(?:ed)? |adhesive )?(?:shear strength|efficiency)", re.I)
 # quantities joint_calc may compute: claiming not_covered for one of these is flagged
 JOINT_CALC_COVERED = re.compile(r"preload|torque|bolt (?:load|stiffness|stress|fatigue)|member stiffness|load factor|"
                                 r"thread|interaction|bond(?:ed)?|adhesive|weld|fatigue life|\bS-?N\b|\bFAT\b|"
