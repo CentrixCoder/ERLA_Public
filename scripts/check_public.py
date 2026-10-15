@@ -56,11 +56,20 @@ def scan(root: Path) -> list[str]:
             except UnicodeDecodeError:
                 problems.append(f"{rel}: binary file")
                 continue
-            for n, line in enumerate(text.splitlines(), 1):
-                for label, rx in BLOCKED_TEXT.items():
-                    if m := rx.search(line):
-                        problems.append(f"{rel}:{n}: {label}: {m.group(0)[:60]}")
+            problems += _text_problems(rel, text)
+    readme = root / "README.md"            # release notes are written into it at every release
+    if readme.is_file():
+        problems += _text_problems("README.md", readme.read_text(encoding="utf-8"))
     return problems
+
+
+def _text_problems(rel: str, text: str) -> list[str]:
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        for label, rx in BLOCKED_TEXT.items():
+            if m := rx.search(line):
+                out.append(f"{rel}:{n}: {label}: {m.group(0)[:60]}")
+    return out
 
 
 def versions(root: Path, tag: str | None) -> list[str]:
@@ -72,6 +81,10 @@ def versions(root: Path, tag: str | None) -> list[str]:
     except (OSError, ValueError) as e:
         return [f"manifest missing or not valid JSON: {e}"]
     found = {"plugin.json": plugin.get("version"), "marketplace.json": market.get("version"), "core/VERSION": core}
+    badge = re.search(r"img\.shields\.io/badge/version-([0-9][0-9A-Za-z.]*)-blue",
+                      (root / "README.md").read_text(encoding="utf-8")) if (root / "README.md").is_file() else None
+    if badge:
+        found["README badge"] = badge.group(1)
     if tag:
         found["tag"] = tag.removeprefix("v")
     if len(set(found.values())) != 1:

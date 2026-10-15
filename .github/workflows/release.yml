@@ -33,8 +33,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ver="${GITHUB_REF_NAME#v}"
+          python - "$ver" > whats_new.md <<'PYEOF'
+          import re, sys
+          readme = open("README.md", encoding="utf-8").read()
+          m = re.search(rf"^### {re.escape(sys.argv[1])}\s*\n(.*?)(?=^### |<!-- release-notes:end -->)", readme, re.M | re.S)
+          print(m.group(1).strip() if m else "")
+          PYEOF
           cat > notes.md <<EOF
           ERLA $ver, the Engineering Research Library Agent.
+
+          $(cat whats_new.md)
 
           **Claude app (desktop or claude.ai):** download \`erla-plugin.zip\` below, then Plugins → + Add → Upload.
 
