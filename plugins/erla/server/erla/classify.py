@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 import yaml
 
@@ -157,6 +159,16 @@ DOC_TYPE_RULES = [
     ("calculation", re.compile(r"\.(xls|xlsx|xlsm|csv)$", re.I)),
 ]
 
+RAISING_TYPES = frozenset({"standard", "handbook", "textbook", "paper"})   # default tier T1/T2
+# a keyword right after one of these words refers to another document ("consistent with the handbook",
+# "tested per ASTM E8"); it must not raise this document's type and tier (integrity attacks, 0.3.6)
+_REFERRING = re.compile(r"\b(?:the|per|with|see|from|to|by|under|using|than|in accordance with|according to)\s*$", re.I)
+
+
+def _names_itself(pat: re.Pattern, probe: str) -> bool:
+    """A raising-type keyword that is not a reference to some other document."""
+    return any(not _REFERRING.search(probe[max(0, m.start() - 30):m.start()]) for m in pat.finditer(probe))
+
 DISCIPLINE_KEYWORDS = {
     "fatigue": r"fatigue|S-N|crack growth|fracture|da/dN|endurance",
     "materials": r"material propert|allowable|tensile strength|yield strength|alloy|temper|heat treat",
@@ -193,8 +205,13 @@ def classify_document(rel_path: str, ext: str, title: str, head_text: str) -> di
 
     doc_type = None
     for name, pat in DOC_TYPE_RULES:
-        target = rel_path if name in ("solver_output", "solver_input", "presentation", "calculation") else probe
-        if pat.search(target):
+        if name in ("solver_output", "solver_input", "presentation", "calculation"):
+            found = pat.search(rel_path) is not None
+        elif name in RAISING_TYPES:
+            found = _names_itself(pat, probe)
+        else:
+            found = pat.search(probe) is not None
+        if found:
             doc_type = name
             break
 
@@ -292,25 +309,131 @@ def tier_for_url(url: str) -> str:
 
 
 # --------------------------------------------------------- web-query safety
-PN_RE = re.compile(r"\b(?:P/?N|PART\s*(?:NO|NUMBER))[:#\s]*[\w-]{3,}|\b\d{3,}-\d{3,}(?:-\d+)?\b", re.I)
-
+DASHES = "‐‑‒–—―−-"     # hyphen last: literal inside a character class
+PN_RE = re.compile(rf"\b(?:P/?N|PART\s*(?:NO\b\.?|NUMBER|#))[:#.\s]*[\w{DASHES}]{{3,}}"
+                   rf"|\b\d{{3,}}[{DASHES}]\d{{3,}}(?:[{DASHES}]\d+)?\b", re.I)
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+# an address spelled out to get past a filter: jane.doe(at)corp.com, jane.doe at corp-example dot com
+# (integrity attacks, 0.3.6); a plain "data at nasa.gov" is not an address and still passes
+EMAIL_SPELLED_RE = re.compile(
+    r"\b[\w.%+-]+\s*(?:\(at\)|\[at\])\s*[\w-]+(?:\s*(?:\.|\(dot\)|\[dot\])\s*[\w-]+)+"
+    r"|\b[\w.%+-]+\s+at\s+[\w-]+(?:\s*(?:\.|\s+dot\s+|\(dot\)|\[dot\])\s*[\w-]+)*?"
+    r"(?:\s+dot\s+|\(dot\)|\[dot\])\s*(?:com|org|net|gov|mil|edu|io|co|us|uk|de|fr|ca|au|info|biz)\b", re.I)
 
 SHORT_TERM = 6      # folded terms shorter than this match only as whole words
+COLLAPSED_MIN = 8   # long terms also match with every separator removed ("z e p h y r i n e", "a/b/c")
+
+# Cyrillic and Greek letters that look like Latin ones ("zеphyrine" with a Cyrillic e)
+_CONFUSABLES = str.maketrans({
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s",
+    "ԁ": "d", "ԛ": "q", "ԝ": "w", "ү": "y", "А": "a", "В": "b", "Е": "e", "К": "k", "М": "m", "Н": "h",
+    "О": "o", "Р": "p", "С": "c", "Т": "t", "Х": "x", "І": "i", "Ј": "j", "Ѕ": "s", "α": "a", "ε": "e",
+    "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x", "Α": "a", "Β": "b",
+    "Ε": "e", "Ζ": "z", "Η": "h", "Ι": "i", "Κ": "k", "Μ": "m", "Ν": "n", "Ο": "o", "Ρ": "p", "Τ": "t",
+    "Υ": "y", "Χ": "x"})
+_B64_RE = re.compile(r"[A-Za-z0-9+/_-]{12,}={0,2}")
+_TOKEN_RE = re.compile(r"[a-z0-9]+(?:[-.][a-z0-9]+)*")
+# words of a classification marking itself; they identify no program, part or person
+MARKING_WORDS = frozenset({"itar", "export", "controlled", "control", "information", "proprietary", "confidential",
+                           "company", "distribution", "statement", "limited", "unclassified", "restricted",
+                           "sensitive", "internal", "eccn", "ear99", "distribute", "outside"})
+
+
+def _normalize(text: str) -> str:
+    """NFKC, invisible format characters (zero-width etc.) removed, look-alike letters mapped to Latin."""
+    t = unicodedata.normalize("NFKC", text)
+    return "".join(ch for ch in t if unicodedata.category(ch) != "Cf").translate(_CONFUSABLES)
 
 
 def _fold(text: str) -> str:
-    return re.sub(r"[\s_.+-]+", " ", text.lower()).strip()
+    return re.sub(r"[\W_]+", " ", _normalize(text).lower()).strip()
 
 
-def _term_in(t: str, q: str) -> bool:
-    """A flagged term in a folded query. Long terms match anywhere; short ones (an acronym file
-    name such as "ZQXJ") only as whole words, so they neither leak nor block every query that
-    happens to contain the letters (leak probes on a real site, 0.2.16)."""
+def expand_outbound(text: str) -> str:
+    """The text plus every decoded form a filter could otherwise miss: repeated URL decoding
+    (``%255F``) and base64 tokens in a query or URL (integrity attacks, 0.3.6)."""
+    out, cur = [text], text
+    for _ in range(4):
+        nxt = unquote_plus(cur)
+        if nxt == cur:
+            break
+        out.append(nxt)
+        cur = nxt
+    for tok in _B64_RE.findall(cur):
+        for decode in (base64.urlsafe_b64decode, base64.b64decode):
+            try:
+                s = decode(tok + "=" * (-len(tok) % 4)).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if s and sum(ch.isprintable() for ch in s) / len(s) > 0.9:
+                out.append(s)
+                break
+    return "\n".join(dict.fromkeys(out))
+
+
+def _term_in(t: str, q: str, qc: str | None = None) -> bool:
+    """A flagged term in a folded query. Long terms match anywhere, also with all separators removed
+    (``qc``, the collapsed query); short ones (an acronym file name such as "ZQXJ") only as whole
+    words, so they neither leak nor block every query that happens to contain the letters (leak
+    probes on a real site, 0.2.16)."""
     if len(t) >= SHORT_TERM:
-        return t in q
+        tc = t.replace(" ", "")
+        return t in q or (qc is not None and len(tc) >= COLLAPSED_MIN and tc in qc)
     if len(t) < 3 or not re.search(r"[a-z]", t):
         return False    # "1", "a", "2019": no identifying content; numbers are left to PN_RE
     return re.search(rf"(?<![a-z0-9]){re.escape(t)}(?![a-z0-9])", q) is not None
+
+
+def _candidates(q: str) -> list[str]:
+    """Query words that could name something: words of 5+ letters, and codes with letters and digits
+    ("kestrel-9", "lc-447"); a material designation such as "7050-t7451" has one letter and is not one."""
+    found: set[str] = set()
+    words = _TOKEN_RE.findall(q)
+    # a code written apart ("lc 447") is also tried joined, as an index stores it ("lc-447")
+    joined = [f"{a}-{b}" for a, b in zip(words, words[1:]) if a.isalpha() and len(a) <= 4 and b.isdigit()]
+    for t in words + joined:
+        for p in (t, *re.split(r"[-.]", t)):
+            letters, digits = sum(c.isalpha() for c in p), sum(c.isdigit() for c in p)
+            if (letters >= 5 and not digits) or (letters >= 2 and digits and len(p) >= 4):
+                found.add(p)
+    return sorted(found - MARKING_WORDS)[:40]
+
+
+def _restricted_name(con: sqlite3.Connection, q: str, docs: list, flagged: set[int],
+                     allowed: set[str]) -> str | None:
+    """G2.2 for single words and for names inside flagged documents (integrity attacks, 0.3.6): a query
+    word that names something - a code with letters and digits, a word the flagged text always writes
+    capitalised, or a word only in a flagged file name - and that occurs in a flagged document but in no
+    unflagged one. Returns the flagged file it came from, or None. Generic words ("forging") pass: the
+    flagged text writes them in lower case or unflagged documents use them too."""
+    for tok in _candidates(q):
+        if tok in allowed:
+            continue
+        rx = re.compile(rf"(?<![a-z0-9]){re.escape(tok)}", re.I)
+        if any(rx.search(_fold(f"{Path(r['path']).stem} {r['title'] or ''}"))
+               for r in docs if r["doc_id"] not in flagged):
+            continue                                    # an unflagged document is named with it
+        match = f'"{tok}" OR "{tok}"*'
+        rows = con.execute("SELECT c.doc_id, c.text FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.rowid "
+                           "WHERE chunks_fts MATCH ? LIMIT 400", (match,)).fetchall()
+        unflagged = con.execute(
+            "SELECT c.doc_id, c.text FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.rowid "
+            "JOIN documents d ON d.doc_id = c.doc_id WHERE chunks_fts MATCH ? AND d.classification_flag IS NULL "
+            "LIMIT 50", (match,)).fetchall()
+        if any(r["doc_id"] not in flagged and rx.search(r["text"] or "") for r in unflagged):
+            continue                                    # used in unflagged text: generic
+        occurrences = [m.group(0) for r in rows if r["doc_id"] in flagged for m in rx.finditer(r["text"] or "")]
+        named = [r for r in docs if r["doc_id"] in flagged
+                 and rx.search(_fold(f"{Path(r['path']).stem} {r['title'] or ''}"))]
+        source = {r["doc_id"] for r in rows if r["doc_id"] in flagged} | {r["doc_id"] for r in named}
+        if not source:
+            continue
+        name_like = (any(c.isdigit() for c in tok) or (named and not occurrences)
+                     or bool(occurrences) and all(o[0].isupper() for o in occurrences))
+        if name_like:
+            doc = next(r for r in docs if r["doc_id"] in source)
+            return Path(doc["path"]).name
+    return None
 
 
 def web_allow_terms(cfg: object | None) -> list[str]:
@@ -332,25 +455,33 @@ def web_query_check(query: str, con: sqlite3.Connection | None = None,
     but not a title such as "RPT-0042_Shear_Lag_revA", and it never removes words from the
     query, so a longer flagged name that contains the allowed term still blocks."""
     reasons = []
-    if PN_RE.search(query):
+    # decoded and normalised first: double URL encoding, base64, zero-width characters and look-alike
+    # letters reach the same checks as plain text (integrity attacks, 0.3.6)
+    text = _normalize(expand_outbound(query))
+    if PN_RE.search(text):
         reasons.append("contains a part-number-like token")
-    if re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", query):
+    if EMAIL_RE.search(text) or EMAIL_SPELLED_RE.search(text):
         reasons.append("contains an email address")
     if con is not None:
         # separators folded on both sides: "secret_widget", "secret-widget", "secret widget" and a
         # URL's "secret+widget" are the same term (adversarial eval, 0.2.15)
-        q = _fold(query)
+        q = _fold(text)
+        qc = q.replace(" ", "")
         allowed = {_fold(a) for a in allow or []}
         # flagged documents and every member of their copy groups, whichever copy is the canonical
         # record (a renamed copy's file name identifies it as well; copies indexed before the next
         # refresh may carry no flag of their own)
         groups = copy_group_flags(con)
-        rows = [r for r in con.execute("SELECT doc_id, path, title, classification_flag FROM documents")
-                if r["classification_flag"] or r["doc_id"] in groups]
+        docs = con.execute("SELECT doc_id, path, title, classification_flag FROM documents").fetchall()
+        rows = [r for r in docs if r["classification_flag"] or r["doc_id"] in groups]
         for r in rows:
             for term in (Path(r["path"]).stem, r["title"] or ""):
                 t = _fold(term)
-                if t and t not in allowed and _term_in(t, q):
+                if t and t not in allowed and _term_in(t, q, qc):
                     reasons.append(f"contains a term from a flagged document ({Path(r['path']).name})")
                     break
+        if not reasons:
+            source = _restricted_name(con, q, docs, {r["doc_id"] for r in rows}, allowed)
+            if source:
+                reasons.append(f"contains a name or code found only in a flagged document ({source})")
     return reasons

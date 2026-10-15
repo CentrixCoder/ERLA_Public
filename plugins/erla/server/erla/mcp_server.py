@@ -35,6 +35,7 @@ import re
 import subprocess
 import sys
 import threading
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,19 @@ INJECTION_RE = re.compile(
     r"ignore (?:all |any |the )?(?:previous|prior|above|earlier) (?:instructions|prompts?)|"
     r"disregard (?:the |all )?(?:previous|prior|system|above)|you are now (?:a|an|in)\b|"
     r"new instructions\s*:|system prompt|<\s*/?\s*(?:system|assistant|instructions?)\s*>|"
-    r"(?:send|upload|email|post) (?:this|the|these) (?:file|document|data)s? to|exfiltrat", re.I)
+    r"(?:send|upload|email|post) (?:this|the|these) (?:file|document|data)s? to|exfiltrat|"
+    # polite and indirect forms (integrity attacks, 0.3.6): text addressed to the model, secrecy
+    # requests, standing orders, chat-template tokens, tool names, and calls to open a URL
+    r"(?:note|message|instructions?|guidance)\s+(?:to|for)\s+(?:the\s+|any\s+)?(?:ai|assistant|model|llm|chatbot|agent)\b|"
+    r"\b(?:ai|assistant|model|llm|agent)\s+(?:reading|processing|summari[sz]ing|parsing)\s+this\b|"
+    r"from now on,?\s+(?:you|always|never|report|answer)\b|"
+    r"\b(?:do not|don't|never)\s+(?:mention|tell|reveal|disclose|show)\b[^.\n]{0,40}\b(?:user|note|instruction)s?\b|"
+    r"\bwhen (?:you are )?asked (?:about|for)\b|"
+    r"<\|im_(?:start|end)\|>|\[/?INST\]|<<\s*/?SYS\s*>>|^\s*(?:assistant|ai)\s*:|"   # not "System:", a common label
+    r"<!--[^>]{0,200}?\b(?:assistant|ai|model|llm|instruction)|"
+    r"\b(?:export_packet|web_?fetch|web_?search|library_show|verify_packet|log_request)\b|"
+    r"\b(?:after|then|also)\b[^.\n]{0,60}\b(?:open|visit|fetch|call|load|send|post)\b[^.\n]{0,40}https?://|"
+    r"https?://\S*[?&]\w+=(?:\{|<|\$|USER|QUESTION|QUERY|PROMPT)", re.I | re.M)
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _LOCK = threading.RLock()
 STARTUP_NOTES: list[str] = []
@@ -104,10 +117,17 @@ def _guard(fn):
     return wrapper
 
 
+def _visible(text: str) -> str:
+    """Document text as a reader sees it: NFKC, without zero-width and other invisible format
+    characters ("ig​nore previous instructions" must still match)."""
+    t = unicodedata.normalize("NFKC", text)
+    return "".join(ch for ch in t if unicodedata.category(ch) != "Cf")
+
+
 def _anomalies(source: str, items: list[tuple[str, str]]) -> list[dict]:
     out = []
     for locator, text in items:
-        m = INJECTION_RE.search(text or "")
+        m = INJECTION_RE.search(_visible(text or ""))
         if m:
             out.append({"type": "prompt_injection_text (G4.2)", "source": source, "locator": locator,
                         "match": m.group(0)[:80]})
