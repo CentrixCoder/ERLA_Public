@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.7-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.3.8-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,12 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.3.8
+
+- **Authority tiers explained.** The README has a new section on the six source tiers, T1 to T6. It
+  covers what each tier means, how ERLA ranks sources and rates confidence by tier, how a tier is
+  assigned, and how to filter results by tier.
+
 ### 0.3.7
 
 - Maintenance release; no user-facing notes were written for this version.
@@ -135,6 +141,52 @@ that no specialist reviewed it.
   again and upload it over the old version.
 
 The download link above always points to the newest release.
+
+<!-- public:begin authority-tiers -->
+## Authority tiers (T1 to T6)
+
+Every document in the library and every web page ERLA reads gets an **authority tier**, T1 to T6.
+The tier says how much weight a source carries as engineering evidence. T1 is the strongest and T6
+the weakest. It is not a judgement of whether a particular value is right: a T1 standard can contain
+a misprint, which is why every value is still opened on its page and checked by `verify_packet`.
+The definitions are in `rules_and_guidelines.md` §1.
+
+| Tier | Source class | Examples | What ERLA does with it |
+|---|---|---|---|
+| **T1** | Governing standards, specifications and design-basis data | MMPDS / MIL-HDBK-5, ASTM, SAE AMS, MIL-STD, ISO, EN/Eurocode, ASME BPVC, AWS D1.x, NASA-STD, company design manuals | Design values; confidence can be HIGH |
+| **T2** | Authoritative references | Peterson's, Roark's, Shigley, Bruhn, Niu, ASM Handbooks, ESDU, NASA TM/TR/CR, NIST, peer-reviewed journals, solver theory manuals | Design values and methods; confidence can be HIGH |
+| **T3** | Validated internal work | Signed analysis and test reports, correlated FEA runs, approved memos | Design values, at most MEDIUM–HIGH confidence; analysis and test documents are never ranked above T3 |
+| **T4** | Manufacturer and vendor data | OEM datasheets, catalogue data, application notes | Supporting data, at most MEDIUM; not a design value on its own |
+| **T5** | Informal sources | Conference slides, theses, preprints, internal drafts, uncorrelated FEA runs, solver input/output and calculation files | LOW–MEDIUM; reported as a lead or for comparison, not as a design value |
+| **T6** | Unvetted web | Forums, blogs, Q&A sites, Wikipedia | A lead only: ERLA follows it to the primary source and cites that, never the T6 page |
+
+How the tiers are used:
+- **Ranking:** results are ordered by tier first, then relevance, then date (R1.1).
+- **Design values come from T1–T3 only** (R1.3). When only T4–T6 sources exist, the Result Packet
+  says so.
+- **Confidence follows the tier:** HIGH needs T1–T2 with matching conditions; T3–T4 give MEDIUM;
+  T5–T6 give LOW. OCR, chart reading, unit conversion or an unknown revision lowers it one step
+  (rules §2).
+- **Filtering:** `tier 1,2` in `/erla:find` and `/erla:files`, `--tier T1,T2` on the CLI, or
+  `tiers` on the MCP tools.
+
+How a tier is assigned:
+- **Library documents** (rules in `source_authority.yaml`):
+  1. Start from the folder's tier hint, a known publisher, or the document type: standard T1;
+     handbook, textbook or paper T2; test or analysis report T3; datasheet T4; slides, solver files
+     and calculations T5.
+  2. Raise to T2 when the path or title matches an authoritative reference, and to T1 when a
+     standard or handbook matches a standard-ID pattern.
+  3. Cap analysis and test documents at T3 and solver and calculation files at T5 (T3 when they sit
+     under a signed-report path). Caps always win.
+- **Web pages** (`source_tier`, `erla tier <url>`): domains listed in `source_authority.yaml` take
+  their listed tier; other `.gov`, `.mil` and `.edu` sites are T2; anything else is T5.
+- A site can override the rules with its own copy of `source_authority.yaml` in `<site>/config/`.
+  After changing the rules, run `erla reclassify --dry-run` to see the changes, then `erla reclassify`.
+
+The tier is separate from the restricted-document flag (ITAR, EAR, CUI, proprietary). A T1 document
+can also be flagged local-only.
+<!-- public:end authority-tiers -->
 
 ## About this repository
 

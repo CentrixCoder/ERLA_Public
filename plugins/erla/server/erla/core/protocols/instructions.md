@@ -101,7 +101,6 @@ Given an FEA quantity, retrieve the matching closed-form method (Roark case numb
 ### W6. Protocol review (rules §9; skill S16)
 Run when the scheduled review is due, an event trigger is open, or the user asks ("run protocol review", `/find protocol review`).
 1. Scope: full review (all R9.1 documents) if scheduled; affected documents only if event-triggered — state which.
-   Specialist triggers (`specialist_lesson`, `specialist_library_additions`): review that specialist's skill file; read the lessons in `logs/lessons.jsonl` since the last review and open each listed new document before proposing a change.
 2. Gather evidence (read-only): `erla --help` and each subcommand's `--help`; `erla config`; `erla stats`; `erla eval` (compare with last recorded run); `pytest -q`; tail of `logs/retrieval_log.jsonl` (corrections, `not_useful` clusters, recurring NOT FOUND gaps); open triggers in `logs/protocol_review_log.jsonl`; installed versions (Python, Tesseract, Office, fastembed model).
 3. Check each document against the S16 checklist. For external currency items (standard revisions, trusted-domain availability), run `erla webcheck` before each web query; web budget per G8.2.
 4. Write the review report to `out/protocol_review_<YYYY-MM-DD>.md`: findings table (file, section, finding, severity CRITICAL / MAJOR / MINOR, evidence), and a numbered list of proposed changes as before/after diffs with reasons. Guardrail proposals state what protection changes (G1.5).
@@ -109,30 +108,10 @@ Run when the scheduled review is due, an event trigger is open, or the user asks
 6. Apply approved changes per R9.6 (backup → edit → `PROTOCOL_REVIEW.md` update → Project copy sync → `pytest` + `erla eval`).
 7. Record per R9.7 and set the next scheduled review date = completion date + `protocol_review.interval_days`.
 
-### W7. Specialist delegation (skill S17; workers `dt-agent` and `joint-agent`)
-Run when the request is specialist work and that worker is installed (`site_info` → `specialists`). ERLA stays the lead throughout. Without the worker (e.g. the free core edition), ERLA does the work itself and the packet states that no specialist reviewed it (S17).
-
-| Worker | Skill file | Route here | Brief parameters (Step 1) | Memo | Calc tool |
-|---|---|---|---|---|---|
-| `dt-agent` (key `dt`) | `dt_skills.md` | damage tolerance: fracture mechanics, crack growth, residual strength, inspection intervals, fail-safe / slow-crack-growth substantiation, MSD/WFD, fracture control, DT test data | material, temper, form, thickness, orientation, geometry, load spectrum, environment, initial flaw, inspection method, regulatory/contract basis | DT Memo | `dt_calc` |
-| `joint-agent` (key `joint`) | `joint_skills.md` | joints: bolted, riveted and other fastened joints, lugs and pins, welded, adhesively bonded and hybrid joints, metallic and composite; static strength, fatigue, fretting, corrosion, thermal, nonlinear and dynamic joint behaviour | joint type; members (material, temper/layup, thickness); fasteners, weld or adhesive (type, size, fit, specification); preload or torque with its friction basis; geometry (edge distance, pitch, rows, overlap); load cases and spectrum; temperature and environment; industry and governing code or certification basis | Joint Memo | `joint_calc` |
-
-1. Steps 0–1 as usual (ERLA). Classify the task (research / design / analysis / certification support), pick the worker from the table, and the sensitivity (G2). A request spanning both (e.g. joint loads, then crack growth at the critical fastener hole) goes to `joint-agent` first; its memo's DT hand-off then goes to `dt-agent` with the joint loads as inputs.
-2. Task Brief to the worker: one-line task; the brief parameters in the table; scope and web budget; required outputs; the names of any flagged documents already in play (local-only). Independent sub-tasks may go to parallel workers, each with its own brief.
-3. The worker reads its skill file, works, and returns one memo (format in its agent file). It does not log, export, write files, spawn agents, or address the user.
-4. Gate (ERLA, before anything reaches the user):
-   - every value ERLA will report: re-open its locator with `library_show` (R3.3), or the web source at its page, and confirm value, units, conditions and `quality_warnings`;
-   - every `COMPUTED` value: inputs traced to locators, web sources or USER INPUT, equation and validity limits stated, units consistent (Step 6.3), and a magnitude check against a closed-form bound or a cited example; a quantity the worker's calc tool covers carries its `calc_id` and passes `verify_packet` against that run, and a hand calculation of one is RETURNed;
-   - the skill file's S0 checklist items reported; conflicts listed, never averaged (G3.4); confidence per rules §2; a Joint Memo input without a source or USER INPUT label is RETURNed (JT-R1);
-   - decision: ACCEPT, RETURN with a numbered defect list (at most 2 rounds), or OVERRIDE with the reason stated in §D. ERLA's decision is final for the packet.
-5. Items the memo marks ASSUMED-NEEDS-APPROVAL (DT) or REQUIRED INPUT (Joint), and design or certification decisions, go to the user; ERLA does not decide them.
-6. Result Packet (rules §6): method, inputs and checks in §A/§B, memo open issues in §D/§E, `<KEY> Memo (inline)` label when ERLA ran the procedure itself because the Agent tool was unavailable.
-7. Learn: for each lesson ERLA accepts (a mistake caught at the gate or by the user, a user correction, a method clarification, a new resource) call `record_lesson` / `erla lesson` with the worker's key. Lessons and `specialist_library_additions` triggers are resolved in W6: ERLA proposes before/after changes to that worker's skill file (do-not list, resource register, skill text), and applies them only after the user approves each one (G1.2, R9.5).
-
 ### W8. Release update & local/cloud sync (skill S18; G10)
 Run after every ERLA release, when Step 0.4 finds drift, or when the user asks.
 1. Source: the release is merged and tagged in the GitHub repo, and the repo-root protocol files are identical to the bundled copies in `plugins/erla/server/erla/core/protocols/` (`packaging/build.py`).
-2. Local: app upload install (G10.1) → upload the release's `erla-plugin-<version>.zip` in the Claude app (Plugins → Add → Upload) in place of the old upload; marketplace install → `claude plugin marketplace update erla-tools`, then `claude plugin update erla@erla-tools` (or `/plugin …` in the Claude Code terminal). Then restart the plugin (desktop app: Settings → Plugins, off and on; Claude Code terminal: `/mcp`). Confirm `site_info.erla_version` = the release and the release's commands and agents (e.g. `/erla:dt`) are present.
+2. Local: app upload install (G10.1) → upload the release's `erla-plugin-<version>.zip` in the Claude app (Plugins → Add → Upload) in place of the old upload; marketplace install → `claude plugin marketplace update erla-tools`, then `claude plugin update erla@erla-tools` (or `/plugin …` in the Claude Code terminal). Then restart the plugin (desktop app: Settings → Plugins, off and on; Claude Code terminal: `/mcp`). Confirm `site_info.erla_version` = the release and the release's commands and agents are present.
 3. Processes: list running ERLA servers and jobs (S18). Any from another runtime → report; stop it only with the user's approval; if it was an index job, restart with `index_start` from the active version.
 4. Cloud: with a marketplace install, if the user keeps a claude.ai account upload for web chats, it is replaced with the same release's `erla-plugin-<version>.zip` and the old upload removed; otherwise confirm no account copy remains. Re-sync the claude.ai Project reference copies (protocol files, `CLOUD_MODE.md`) from the repo.
 5. Leftovers: list stale runtimes, data folders and caches (S18); delete only the paths the user approves (G10.4).

@@ -20,13 +20,11 @@ Your job is to **find, extract, verify, and cite** engineering information that 
 | 3 | `ERLA.md` | This file: identity, context, map |
 | 4 | `instructions.md` | Step-by-step runtime workflow |
 | 5 | `skills.md` | Capability catalog and procedures |
-| 6 | `dt_skills.md` | Damage-tolerance specialist skills, when installed (read by the DT worker and by ERLA when it delegates DT work; S17, W7) |
-| 7 | `joint_skills.md` | Joints specialist skills, when installed (read by the Joint worker and by ERLA when it delegates joint work; S17, W7) |
 
-Precedence on conflict: 1 > 2 > 3 > 4 > 5 > 6, 7. The two specialist files each govern their own domain and do not override each other. Report any conflict you detect.
+Precedence on conflict: 1 > 2 > 3 > 4 > 5. Report any conflict you detect.
 
-**Agent hierarchy (S17, W7):** the user is the final authority (approvals, design decisions; ERLA does not certify, G6.1). ERLA is the lead agent: it delegates discipline work to specialist workers, verifies what they return, and alone issues the Result Packet, writes logs and exports, and records lessons. Specialists (the damage-tolerance agent `dt-agent` and the joints agent `joint-agent`) are leaf workers: they return a memo to ERLA, do not spawn agents, write files or address the user, and are bound by every ERLA protocol above their own skill file.
-Specialists are optional add-ons: `site_info` → `specialists` lists the ones installed (the free core edition has none). When the specialist a task needs is not installed, ERLA does the work itself under these protocols (no delegation, no `record_lesson`, no `dt_calc` / `joint_calc`: computed values go to `verify_packet` with `not_covered`) and the Result Packet states that no specialist reviewed it.
+**Agent hierarchy:** the user is the final authority (approvals, design decisions; ERLA does not certify, G6.1). ERLA alone issues the Result Packet and writes logs and exports.
+This edition has no specialist agents: ERLA does discipline work (for example damage tolerance or joints) itself under these protocols, gives computed values to `verify_packet` with `not_covered`, and states in the Result Packet that no specialist reviewed it.
 Site-specific facts (paths, installed tools, library composition) are in `SITE_NOTES.md`.
 
 **Protocol currency:** these documents are reassessed every `protocol_review.interval_days` (default 90) and on event triggers (rules §9, instructions Step 0 / W6, skill S16). Review status and change history are in `PROTOCOL_REVIEW.md`; check it at the start of each session.
@@ -55,7 +53,6 @@ Site-specific facts (paths, installed tools, library composition) are in `SITE_N
   models/                    local embedding + re-ranker models (downloaded once, then offline)
   logs/refresh.lock          single-instance refresh lock with progress heartbeat
   logs/retrieval_log.jsonl   every query and result packet summary
-  logs/lessons.jsonl         specialist lessons (S17), each also opened as a review trigger
   logs/protocol_review_log.jsonl  protocol reviews and open review triggers
   PROTOCOL_REVIEW.md         protocol review ledger: last/next review, file versions, change history
   out/                       generated reports (writable; full write list and protocol-edit exception in G1.2)
@@ -84,7 +81,6 @@ Web gate and logging
 erla webcheck "<query>"                   G2 check before every web query (SAFE / BLOCKED)
 erla tier <url>                           authority tier of a web source
 erla log '<json>' / erla feedback <doc_id> useful|not_useful
-erla lesson <dt|joint> <mistake|correction|method|resource> "<lesson>" [--evidence ..] [--rule ..]   S17 lessons ledger (lead only)
 
 Index maintenance
 erla stats                                coverage, OCR, duplicates, flags, vectors, property store + change probe

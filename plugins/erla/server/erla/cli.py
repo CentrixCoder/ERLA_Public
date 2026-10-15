@@ -827,14 +827,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("json")
     s.set_defaults(fn=cmd_log)
 
-    s = sub.add_parser("lesson", help="S17: record a specialist lesson and open a review trigger")
     from .specialists import SPECIALISTS
-    s.add_argument("specialist", choices=sorted(SPECIALISTS))
-    s.add_argument("kind", choices=["mistake", "correction", "method", "resource"])
-    s.add_argument("lesson")
-    s.add_argument("--evidence", default="")
-    s.add_argument("--rule", default="")
-    s.set_defaults(fn=cmd_lesson)
+    if SPECIALISTS:                                 # the free core edition has no specialists
+        s = sub.add_parser("lesson", help="record a specialist lesson and open a review trigger")
+        s.add_argument("specialist", choices=sorted(SPECIALISTS))
+        s.add_argument("kind", choices=["mistake", "correction", "method", "resource"])
+        s.add_argument("lesson")
+        s.add_argument("--evidence", default="")
+        s.add_argument("--rule", default="")
+        s.set_defaults(fn=cmd_lesson)
 
     s = sub.add_parser("feedback", help="record result feedback")
     s.add_argument("doc_id", type=int)

@@ -1,8 +1,10 @@
-"""Specialist sub-agents (S17): lessons ledger and library-addition triggers.
+"""Specialist sub-agents: registry, lessons ledger and library-addition triggers.
 
-ERLA is the lead agent; discipline specialists (the damage-tolerance agent ``dt-agent``, specialist key ``dt``, and the joints
-agent ``joint-agent``, key ``joint``) are workers it delegates to. Their skill files are protocol files (precedence below skills.md) and
-change only through the protocol review (rules section 9) after the user approves each change.
+ERLA is the lead agent; discipline specialists, where installed, are workers it delegates to. Each
+specialist module declares its registry entry (``SPECIALIST``: key, agent, skill file, calculation tool,
+topic terms, verify-gate quantities); this module discovers the ones the build ships. The free core
+edition ships none. Skill files are protocol files (precedence below skills.md) and change only through
+the protocol review (rules section 9) after the user approves each change.
 This module records the two events that make a specialist skill file due for review:
 
 * a lesson (a mistake, a user correction, a method clarification) - appended to
@@ -16,7 +18,6 @@ in ``protocol_status`` / ``site_info`` until the next recorded review.
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
@@ -24,43 +25,31 @@ from typing import Any
 from . import safeio
 from .config import Config, protocol_dir
 
-SPECIALISTS: dict[str, dict[str, Any]] = {
-    "dt": {
-        "name": "Damage Tolerance",
-        "agent": "dt-agent",          # plugin agent name (the Claude app refuses names under 3 characters)
-        "skills": "dt_skills.md",
-        "calc": "dtcalc", "tool": "dt_calc",
-        "terms": re.compile(
-            r"damage[\s-]*toleran|fracture[\s-]*mechanic|fracture[\s-]*toughness|fracture[\s-]*control|"
-            r"crack[\s-]*(?:growth|propagation|closure|arrest|retardation)|fatigue[\s-]*crack|"
-            r"stress[\s-]*intensity|da\s*/\s*dn|residual[\s-]*strength|j[\s-]*integral|\bctod\b|"
-            r"fail[\s-]*safe|widespread[\s-]*fatigue|multiple[\s-]*site[\s-]*damage|leak[\s-]*before[\s-]*burst|"
-            r"probability[\s-]*of[\s-]*detection|inspection[\s-]*interval|\bnasgro\b|\bafgrow\b|\bfastran\b|"
-            r"\bk_?ic\b|\bk_?iscc\b|r[\s-]*curve|weight[\s-]*function", re.I),
-    },
-    "joint": {
-        "name": "Joints",
-        "agent": "joint-agent",
-        "skills": "joint_skills.md",
-        "calc": "jointcalc", "tool": "joint_calc",
-        "terms": re.compile(
-            r"(?:bolted|riveted|fastened|welded|bonded|adhesive|mechanical|composite|lap|butt|pin)[\s-]*joints?\b|"
-            r"\bfasteners?\b|\brivets?\b|\blugs?\b|\bweld(?:s|ed|ing|ment)?\b|preload|torque[\s-]*tension|"
-            r"bearing[\s-]*bypass|fretting|faying[\s-]*surface|thread(?:ed)?[\s-]*(?:fastener|joint|engagement)|"
-            r"shear[\s-]*out|pull[\s-]*through|splice|galvanic|adhesively|bond[\s-]*line|scarf", re.I),
-    },
-}
+def _discover() -> dict[str, dict[str, Any]]:
+    """Registry entries (``SPECIALIST``) of the specialist modules this build ships (specialist_modules)."""
+    from importlib import import_module
+
+    from .specialist_modules import MODULES
+    found: dict[str, dict[str, Any]] = {}
+    for name in MODULES:
+        try:
+            spec: dict[str, Any] = import_module(f"{__package__}.{name}").SPECIALIST
+        except (ImportError, AttributeError):
+            continue
+        found[str(spec["key"])] = spec
+    return found
+
+
+SPECIALISTS: dict[str, dict[str, Any]] = _discover()
 LESSON_KINDS = ("mistake", "correction", "method", "resource")
 MAX_LISTED = 25
 
 
 def installed() -> dict[str, dict[str, Any]]:
-    """Specialists present in this install: skill file served and calc module shipped. The free core
-    edition (packaging/build.py --edition core) ships neither, so ERLA runs without delegation."""
-    from importlib.util import find_spec
+    """Specialists present in this install: module shipped (it is in SPECIALISTS) and skill file served.
+    The free core edition ships neither, so ERLA runs without delegation."""
     pdir = protocol_dir()
-    return {k: s for k, s in SPECIALISTS.items()
-            if (pdir / s["skills"]).is_file() and find_spec(f"{__package__}.{s['calc']}") is not None}
+    return {k: s for k, s in SPECIALISTS.items() if (pdir / s["skills"]).is_file()}
 
 
 def now() -> str:

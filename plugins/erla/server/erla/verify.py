@@ -1,7 +1,7 @@
 """Result Packet verification (G3.1/G3.2/G3.5, law L3: the model proposes, code verifies).
 
 ``verify_items`` re-opens every cited locator and checks, deterministically, that each reported
-value is actually there. The agent's own re-reading (the W7 gate, rules section 2) stays; this is
+value is actually there. The agent's own re-reading (rules section 2) stays; this is
 the check that does not depend on the model.
 
 Item kinds:
@@ -12,10 +12,10 @@ Item kinds:
             the conversion is recomputed with erla.units.
   quote     ``text`` must appear at the locator (case, spacing, quote marks and dashes normalized);
             over 15 words is a G5.2 warning.
-  computed  a calculated value (0.2.19, law L1). With ``calc_id`` (returned by dt_calc or, from 0.3.0,
-            joint_calc) and ``calc_output`` (a result name, e.g. ``a_crit``) the value is checked against
-            that recorded run; ``scale`` 2 or 0.5 converts a half crack length to a total one or back.
-            Without a run it needs ``not_covered`` (why neither tool applies): status COMPUTED, model
+  computed  a calculated value (0.2.19, law L1). With ``calc_id`` (returned by an installed specialist's
+            calculation tool) and ``calc_output`` (a result name) the value is checked against that
+            recorded run; ``scale`` 2 or 0.5 converts a half length to a total one or back.
+            Without a run it needs ``not_covered`` (why no tool applies): status COMPUTED, model
             arithmetic not checked by code. Neither: FAIL - a hand calculation cannot pass silently.
             Verify each input as its own value item either way.
 
@@ -52,7 +52,7 @@ QUOTE_MAX_WORDS = 15      # G5.2
 
 RULE = ("Report as verified only items with status PASS. FAIL: correct the value or locator and verify "
         "again, or report the value as NOT VERIFIED; never report it as sourced (G3.1/G3.2). A computed "
-        "value passes only against a dt_calc or joint_calc run (calc_id + calc_output); COMPUTED (not_covered) "
+        "value passes only against a recorded calc run (calc_id + calc_output); COMPUTED (not_covered) "
         "is model arithmetic: show the equation, say why the calc tool did not apply, and verify each input as its own "
         "item. Carry every warning into the packet "
         "(OCR values: mark OCR, lower confidence, recommend visual check, G3.5; flagged: label, G2.4). "
@@ -433,37 +433,16 @@ def _check_quote(sel: list[sqlite3.Row], item: dict[str, Any], res: dict[str, An
 
 
 CALC_SCALES = (1.0, 2.0, 0.5)     # as computed; half length -> total crack length; total -> half
-# quantities dt_calc certainly computes: a hand calculation of one fails (0.2.20; it held 1 run in 5 by prompt)
-CALC_REQUIRED = re.compile(r"critical crack|(?<![a-z])a_?c\b|a_crit|stress[- ]intensity|residual strength|"
-                           r"crack[- ]growth (?:life|interval|cycles)", re.I)
-# quantities dt_calc may compute: claiming not_covered for one of these is flagged
-CALC_COVERED = re.compile(r"critical|a_?c\b|a_crit|crack length|stress intensity|\bK\b|\bdelta ?K\b|life|cycles|"
-                          r"\bN\b|residual strength", re.I)
-# quantities joint_calc certainly computes (0.3.0, same rule as CALC_REQUIRED for dt_calc)
-JOINT_CALC_REQUIRED = re.compile(r"joint (?:stiffness )?constant|stiffness (?:constant|ratio)|separation (?:load|factor)|"
-                                 r"thermal preload|weld (?:group|throat)|throat (?:shear )?stress|volkersen|shear[- ]lag|"
-                                 r"\blug (?:bearing|net[- ]section|ultimate|transverse|oblique|allowable|strength)|"
-                                 r"pin bending|weak[- ]pin|bearing[- ]bypass|bypass (?:intercept|allowable)|"
-                                 r"goland|reissner|bending[- ]moment factor|"
-                                 r"elastic[- ]plastic (?:adhesive )?shear|potential (?:adhesive )?shear strength|"
-                                 r"single[- ]lap (?:joint |bond(?:ed)? |adhesive )?(?:shear strength|efficiency)", re.I)
-# quantities joint_calc may compute: claiming not_covered for one of these is flagged
-JOINT_CALC_COVERED = re.compile(r"preload|torque|bolt (?:load|stiffness|stress|fatigue)|member stiffness|load factor|"
-                                r"thread|interaction|bond(?:ed)?|adhesive|weld|fatigue life|\bS-?N\b|\bFAT\b|"
-                                r"\blugs?\b|pin shear|bushing|\btang\b|flexibilit|fastener (?:load|spring)|"
-                                r"load distribution|single[- ]lap|\bpeel\b", re.I)
-
 
 def _calc_tools() -> dict[str, tuple[re.Pattern[str], re.Pattern[str]]]:
-    """Calc tools of the installed specialists (none in the free core edition): required and covered quantities."""
+    """Calc tools of the installed specialists (none in the free core edition): the quantities each certainly
+    computes (a hand calculation of one fails) and may compute (claiming not_covered is flagged)."""
     from .specialists import installed
-    rules = {"dt_calc": (CALC_REQUIRED, CALC_COVERED), "joint_calc": (JOINT_CALC_REQUIRED, JOINT_CALC_COVERED)}
-    tools = [str(s["tool"]) for s in installed().values()]
-    return {t: rules[t] for t in tools if t in rules}
+    return {str(s["tool"]): (s["required"], s["covered"]) for s in installed().values()}
 
 
 def _tool(run: dict[str, Any]) -> str:
-    return str(run.get("cmd") or "mcp.dt_calc").removeprefix("mcp.")
+    return str(run.get("cmd") or "mcp.calc").removeprefix("mcp.")
 
 
 def _check_computed(item: dict[str, Any], res: dict[str, Any], calc_runs: dict[str, dict[str, Any]]) -> None:
@@ -473,8 +452,9 @@ def _check_computed(item: dict[str, Any], res: dict[str, Any], calc_runs: dict[s
     if not calc_id:
         if not reason:
             if tools:
-                res.update(status="FAIL", reason="computed value without a dt_calc run (or joint_calc run): call the calc "
-                                                 "tool and pass calc_id + calc_output, or state not_covered (why neither applies)")
+                res.update(status="FAIL", reason="computed value without a calc run: call the calc tool ("
+                                                 f"{' or '.join(tools)}) and pass calc_id + calc_output, or state "
+                                                 "not_covered (why no tool applies)")
             else:
                 res.update(status="FAIL", reason="computed value without a calc run: no calculation tool is installed, "
                                                  "so state not_covered with the method used")
@@ -494,8 +474,8 @@ def _check_computed(item: dict[str, Any], res: dict[str, Any], calc_runs: dict[s
         return
     run = calc_runs.get(calc_id)
     if run is None:
-        res.update(status="FAIL", reason=f"calc_id {calc_id} is not a dt_calc run (or joint_calc run) recorded by this "
-                                         "server; call the calc tool and pass the calc_id it returns")
+        res.update(status="FAIL", reason=f"calc_id {calc_id} is not a calc run recorded by this server; call the "
+                                         "calc tool and pass the calc_id it returns")
         return
     outputs: dict[str, float] = run.get("outputs") or {}
     name = str(item.get("calc_output") or "").strip()
@@ -529,7 +509,7 @@ def _check_computed(item: dict[str, Any], res: dict[str, Any], calc_runs: dict[s
 
 def verify_items(con: sqlite3.Connection, items: list[dict[str, Any]],
                  calc_runs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-    """``calc_runs``: dt_calc (0.2.19) and joint_calc (0.3.0) runs recorded by the server, by calc_id."""
+    """``calc_runs``: calculation runs recorded by the server (erla.calcrun), by calc_id."""
     results: list[dict[str, Any]] = []
     docs: dict[int, _Doc] = {}
     groups = copy_group_flags(con)       # G2.5: copies carry their copy group's flag

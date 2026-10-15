@@ -42,6 +42,7 @@ from typing import Any
 
 from . import __version__, safeio
 from .config import AGENT_ROOT, ConfigError, load_config, protocol_dir, validate_config
+from .edition import render
 from .specialists import SPECIALISTS, installed
 
 PROTOCOL_FILES = ["guardrails.md", "rules_and_guidelines.md", "ERLA.md", "instructions.md",
@@ -201,7 +202,7 @@ def t_site_info() -> dict:
                             "specialists": {k: s["agent"] for k, s in installed().items()}}
     if not info["specialists"]:
         info["edition"] = ("core: no specialist agents installed; do discipline work as the lead agent and say "
-                           "no specialist reviewed it (S17)")
+                           "no specialist reviewed it")
     mismatch = _runtime_mismatch()
     if mismatch:
         info["runtime_mismatch"] = mismatch
@@ -539,26 +540,11 @@ def t_source_tier(url: str) -> dict:
     return {"url": url, "tier": tier_for_url(url)}
 
 
-CALC_LOG = "dt_calc_runs.jsonl"
-JOINT_CALC_LOG = "joint_calc_runs.jsonl"
-
-
 def _calc_runs(cfg) -> dict[str, dict]:
-    """dt_calc and joint_calc runs this server recorded, by calc_id. Written only by t_dt_calc / t_joint_calc
-    (no model-facing write)."""
-    runs: dict[str, dict] = {}
-    for name in (CALC_LOG, JOINT_CALC_LOG):
-        p = cfg.log_dir / name
-        if not p.is_file():
-            continue
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict) and rec.get("calc_id"):
-                runs[str(rec["calc_id"])] = rec
-    return runs
+    """Calculation runs this server recorded for the installed specialists, by calc_id (erla.calcrun;
+    written only by the calc tools, no model-facing write)."""
+    from .calcrun import runs
+    return runs(cfg.log_dir, installed().values())
 
 
 def t_verify_packet(items: list[dict]) -> dict:
@@ -572,42 +558,20 @@ def t_verify_packet(items: list[dict]) -> dict:
     return out
 
 
-def t_dt_calc(task: str, params: dict) -> dict:
-    """Run a DT calculation and record it, so verify_packet can check reported values against it (0.2.19)."""
-    import hashlib
-    from . import dtcalc, report
-    out = dtcalc.run(task, params)
-    if "error" in out:
-        return out
-    outputs = dtcalc.numeric_outputs(out)
-    calc_id = "c-" + hashlib.sha256(json.dumps({"task": task, "inputs": out.get("inputs"), "units": out.get("units"),
-                                                "outputs": outputs}, sort_keys=True, default=str).encode()).hexdigest()[:12]
-    report.append_log(_cfg(), {"cmd": "mcp.dt_calc", "calc_id": calc_id, "task": task, "inputs": out.get("inputs"),
-                               "units": out.get("units"), "module": out.get("module"), "outputs": outputs}, CALC_LOG)
-    out["calc_id"] = calc_id
-    out["verify_with"] = {"kind": "computed", "calc_id": calc_id, "calc_output": sorted(outputs)[:40],
-                          "note": "verify_packet item per reported number: calc_output is one of these names; "
-                                  "scale 2 reports a total crack length from a half length"}
-    return out
+def calc_tool(tool: str):
+    """The MCP function for an installed specialist's calculation tool: runs it and records the run, so
+    verify_packet can check reported values against it (0.2.19)."""
+    spec = next((sp for sp in installed().values() if sp["tool"] == tool), None)
+    if spec is None:
+        raise KeyError(f"no installed calculation tool {tool!r}")
 
+    def t_calc(task: str, params: dict) -> dict:
+        from .calcrun import record
+        return record(_cfg(), spec, task, params)
 
-def t_joint_calc(task: str, params: dict) -> dict:
-    """Run a joint calculation and record it, so verify_packet can check reported values against it (0.3.0)."""
-    import hashlib
-    from . import jointcalc, report
-    out = jointcalc.run(task, params)
-    if "error" in out:
-        return out
-    outputs = jointcalc.numeric_outputs(out)
-    calc_id = "j-" + hashlib.sha256(json.dumps({"task": task, "inputs": out.get("inputs"), "units": out.get("units"),
-                                                "outputs": outputs}, sort_keys=True, default=str).encode()).hexdigest()[:12]
-    report.append_log(_cfg(), {"cmd": "mcp.joint_calc", "calc_id": calc_id, "task": task, "inputs": out.get("inputs"),
-                               "units": out.get("units"), "module": out.get("module"), "outputs": outputs},
-                      JOINT_CALC_LOG)
-    out["calc_id"] = calc_id
-    out["verify_with"] = {"kind": "computed", "calc_id": calc_id, "calc_output": sorted(outputs)[:40],
-                          "note": "verify_packet item per reported number: calc_output is one of these names"}
-    return out
+    t_calc.__name__ = f"t_{tool}"
+    t_calc.__doc__ = f"Run {tool} and record the run (calc_id) for verify_packet."
+    return t_calc
 
 
 def t_protocol_section(file: str, key: str) -> dict:
@@ -771,7 +735,7 @@ def job_main(argv: list[str]) -> int:
 # ------------------------------------------------------------------- server
 def _instructions() -> str:
     p = protocol_dir() / "MCP_MODE.md"
-    head = p.read_text(encoding="utf-8") if p.is_file() else ""
+    head = render(p.read_text(encoding="utf-8"), core=False) if p.is_file() else ""
     return head or "ERLA - Engineering Research Library Agent. Read erla://protocols/guardrails first."
 
 
@@ -818,19 +782,15 @@ def build_server():
         "value, units, quantity}] - a material property also gives its temper, direction, basis, thickness and form "
         "as reported (checked against the column the value is printed in); a value from a table names its row (quantity plus material, temper, form, direction, or row = the row's label) and is checked against that row; a converted value adds source_value + "
         "source_units (the conversion is recomputed); kind 'quote' checks text; kind 'computed' gives the calc_id and "
-        "calc_output dt_calc returned (checked against that run; scale 2 for a total crack length) or, when dt_calc "
-        "does not apply, not_covered with the reason (listed as COMPUTED, not checked); a computed value with "
+        "calc_output a calculation tool returned (checked against that run; scale 2 for a total from a half length) "
+        "or, when no tool applies, not_covered with the reason (listed as COMPUTED, not checked); a computed value with "
         "neither FAILS. Returns per-item PASS/FAIL/COMPUTED with evidence and OCR/flag warnings, and a "
         "verification_id for log_request.", ro)
-    if "dt" in spec_on:                     # the description lives in the private calc module
-        from . import dtcalc
-        reg(t_dt_calc, "dt_calc", dtcalc.MCP_DESCRIPTION, ro)
-    if "joint" in spec_on:
-        from . import jointcalc
-        reg(t_joint_calc, "joint_calc", jointcalc.MCP_DESCRIPTION, ro)
+    for spec in spec_on.values():           # names and descriptions live in the specialist modules
+        reg(calc_tool(spec["tool"]), spec["tool"], spec["description"], ro)
     reg(t_protocol_section, "protocol_section", "Read one part of a protocol file instead of the whole file: "
-        "file 'dt_skills' or 'joint_skills' (or another protocol), key a block id ('DT-S8', 'JT-R4', 'DT-L13', "
-        "'JT-W1') or a section number ('5'). Read erla://protocols/<file>/index first for the list of keys.", ro)
+        "file a protocol name (e.g. 'skills'), key a block id (e.g. 'S8', 'W1', 'G2') or a section number "
+        "('5'). Read erla://protocols/<file>/index first for the list of keys.", ro)
     reg(t_web_query_check, "web_query_check", "MANDATORY before every web search: checks the query "
         "contains no part numbers, emails, or terms from flagged (ITAR/EAR/CUI/proprietary) documents. "
         "Returns SAFE or BLOCKED.", ro)
@@ -839,9 +799,9 @@ def build_server():
         "record: {query, scope, sources, budget, flags, verification_id}.", wr)
     reg(t_record_feedback, "record_feedback", "Record user feedback on a source: verdict 'useful' or "
         "'not_useful' (rules R7.2).", wr)
-    reg_if(SPECIALISTS, t_record_lesson, "record_lesson", "Lead agent only (skill S17): record a specialist lesson - kind "
-        "'mistake', 'correction', 'method' or 'resource' - for specialist 'dt' (damage tolerance) or 'joint' "
-        "(joints). Appends to "
+    reg_if(SPECIALISTS, t_record_lesson, "record_lesson", "Lead agent only: record a specialist lesson - kind "
+        "'mistake', 'correction', 'method' or 'resource' - for specialist "
+        + " or ".join(f"'{k}' ({sp['lesson_label']})" for k, sp in spec_on.items()) + ". Appends to "
         "logs/lessons.jsonl and opens a review trigger; the skill file changes only through the protocol "
         "review after the user approves (rules section 9).", wr)
     reg(t_export_packet, "export_packet", "Write a Result Packet (markdown, optional CSV of values) to "
@@ -871,7 +831,7 @@ def build_server():
 
         def _make_reader(p: Path):
             def _reader() -> str:
-                return p.read_text(encoding="utf-8")
+                return render(p.read_text(encoding="utf-8"), core=False)
             return _reader
         srv.resource(f"erla://protocols/{stem}", name=stem, mime_type="text/markdown",
                      description=f"ERLA protocol file {name}")(_make_reader(path))

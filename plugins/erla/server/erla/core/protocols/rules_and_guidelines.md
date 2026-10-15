@@ -112,7 +112,7 @@ On request, write to `out/`: Result Packet as `.md`, values table as `.csv`, ful
 
 Purpose: keep the agent's protocols aligned with the toolkit, the library, the site, current standards, and observed performance, so the agent does not run on stale or contradictory instructions.
 
-- R9.1 Scope — every governing `.md` document: `guardrails.md`, `rules_and_guidelines.md`, `ERLA.md`, `instructions.md`, `skills.md`, `dt_skills.md`, `joint_skills.md`, `SITE_NOTES.md`, `00_BUILD_PLAN.md`, `.claude/agents/erla.md`, `.claude/agents/dt-agent.md`, `.claude/agents/joint-agent.md`, `.claude/commands/find.md`, `.claude/commands/dt.md`, `.claude/commands/joint.md`, the Project copy of `CLOUD_MODE.md`, and the config files they depend on (`config/*.yaml`).
+- R9.1 Scope — every governing `.md` document: `guardrails.md`, `rules_and_guidelines.md`, `ERLA.md`, `instructions.md`, `skills.md`, `SITE_NOTES.md`, `00_BUILD_PLAN.md`, `.claude/agents/erla.md`, `.claude/commands/find.md`, the Project copy of `CLOUD_MODE.md`, and the config files they depend on (`config/*.yaml`).
 - R9.2 Scheduled review — a full reassessment of all R9.1 documents is due every `protocol_review.interval_days` (config; default 90 days) after the last completed review recorded in `PROTOCOL_REVIEW.md`.
 - R9.3 Event-triggered review — a targeted review of the affected documents is due, regardless of the schedule, when any of the following occurs:
   - a CLI command, flag, or output format changes (or `erla --help` differs from what the protocols document);
@@ -123,7 +123,6 @@ Purpose: keep the agent's protocols aligned with the toolkit, the library, the s
   - ≥ 3 user corrections in the log trace to the same rule, synonym gap, or tier assignment;
   - a conflict or broken cross-reference between protocol files is detected during any request;
   - the operating platform changes (Claude tools, Desktop Commander, linking method);
-  - a specialist lesson is recorded (`specialist_lesson`) or a refresh indexes new documents on a specialist's topic (`specialist_library_additions`) — review that specialist's skill file (S17).
 - R9.4 Currency check — at the start of every session, read `PROTOCOL_REVIEW.md`. If the scheduled review is overdue or an event trigger is open, state it in one line at the top of the first Result Packet and under §F Anomalies, and offer to run the review. Do not block the user's request.
 - R9.5 Approval — a review produces proposals, not edits. Each proposed change is shown as a before/after diff with its reason. Edits are applied only after the user approves them (G1.2, G1.5). "No change needed" is a valid outcome and is recorded.
 - R9.6 Applying approved changes — back up every file to be changed into `out/protocol_backup_<YYYY-MM-DD>/` first; then edit; update the file's entry in `PROTOCOL_REVIEW.md` (version, date, summary); keep the precedence order and section numbering consistent; re-sync the Project copies; run `pytest` and `erla eval` and record results.

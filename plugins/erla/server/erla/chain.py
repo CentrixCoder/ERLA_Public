@@ -33,7 +33,7 @@ def run_chain(cfg: Config, *, full: bool = False, ocr_inline: bool = False, run_
     st = idx.run(full=full, ocr=ocr_inline)
     summary["index"] = {k: v for k, v in st.as_dict().items() if k != "failures"}
     summary["index_failures"] = st.failures[:50]
-    # S17: new documents on a specialist's topic open a review trigger for its skill file
+    # new documents on a specialist's topic open a review trigger for its skill file
     summary["specialist_additions"] = specialists.open_addition_triggers(
         cfg, specialists.topic_additions(idx.con, before, since))
     if run_ocr and cfg.ocr.enabled:

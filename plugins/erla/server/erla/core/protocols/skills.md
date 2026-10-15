@@ -127,24 +127,6 @@ Read user feedback from log; compute per-doc and per-query-term boosts; propose 
 **Failure:** if a check cannot run (e.g., eval harness broken, the site computer unreachable), record the check as `NOT RUN` with reason; the review is then `PARTIAL`, and the next scheduled date is not advanced until the missing checks are completed.
 
 
-## S17. Specialist Sub-Agents (lead–worker delegation)
-
-**Purpose:** Give discipline work to a specialist worker while ERLA keeps protocol authority and final decision on what is reported.
-**Hierarchy:** user (final authority, approvals) → ERLA lead (intake, delegation, gate, Result Packet, logs, exports, lessons, protocol proposals) → specialist worker (method, domain retrieval, calculations, memo). Workers are leaf agents: no sub-agents, no file writes, no logging or exports, no contact with the user; every ERLA protocol takes precedence over their skill file. One writer (ERLA) for every persistent record.
-**Availability:** Specialists are optional add-ons: `site_info` → `specialists` lists the ones installed (the free core edition has none). When the specialist a task needs is not installed, ERLA does the work itself under these protocols (no delegation, no `record_lesson`, no `dt_calc` / `joint_calc`: computed values go to `verify_packet` with `not_covered`) and the Result Packet states that no specialist reviewed it.
-**Specialists:**
-
-| Key | Agent | Skill file | Workflow | Topic triggers |
-|---|---|---|---|---|
-| `dt` | `erla:dt-agent` | `dt_skills.md` (precedence 6) | W7 | `erla/specialists.py` `SPECIALISTS["dt"]["terms"]` |
-| `joint` | `erla:joint-agent` | `joint_skills.md` (precedence 7) | W7 | `erla/specialists.py` `SPECIALISTS["joint"]["terms"]` |
-
-**Procedure:** W7 (brief → memo → gate → packet → learn).
-**Learning loop:** (1) lessons: `record_lesson` / `erla lesson` appends to `logs/lessons.jsonl` and opens a `specialist_lesson` trigger; (2) library growth: each refresh (`erla refresh`, `index_start`) matches documents with new content hashes (moves excluded) against the specialist's topic terms on title, path and first two chunks, and opens one `specialist_library_additions` trigger listing them; (3) both triggers show in `protocol_status` / `erla site` until the next recorded review, where W6 proposes skill-file changes for the user's approval. Nothing edits a skill file automatically.
-**Adding a specialist:** a skill file `<key>_skills.md` at the agent root (served automatically from its `SPECIALISTS` entry; add it to `packaging/build.py` `PROTOCOLS`), an agent file `agents/<key>.md` with the same disallowed tools as `dt.md`, a `SPECIALISTS` entry, a row in the W7 worker table, and a row in this table — a protocol change under rules §9. Specialist skill files do not override each other: each governs its own domain, and a conflict between them is reported to the user.
-**Failure:** Agent tool unavailable (chat without sub-agents, depth limit) → ERLA runs the skill-file procedure inline, labelled `<KEY> Memo (inline)`, same gate.
-
-
 ## S18. Install & Version Sync
 
 **Purpose:** Keep one ERLA install per surface, at one version, with no stale servers, jobs or runtimes (G10).

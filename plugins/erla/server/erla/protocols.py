@@ -3,11 +3,10 @@
 A long protocol file stays one file (one source of truth, edited only under rules section 9);
 an agent reads its compact index first and then only the sections the task needs:
 
-  index("dt_skills")                 header, rules in full (binding on every task), section list,
-                                     and one line per skill / workflow / lesson (also "joint_skills")
-  section("dt_skills", "DT-S8")      one skill block;  "DT-R4" one rule;  "DT-L13" one lesson;
-                                     "DT-W1" one workflow;  "5" or "§5" a whole numbered section
-                                     (joint_skills keys: "JT-S8", "JT-R4", "JT-L3", "JT-W1")
+  index(path)                        header, rules in full (binding on every task), section list,
+                                     and one line per skill / workflow / lesson
+  section(path, "S8")                one skill block;  a rule, lesson or workflow id the same way
+                                     (prefixed ids such as "XX-S8" too);  "5" or "§5" a whole section
 
 Works on any protocol file with '## N.' sections and '**ID ...**' / '- **ID ...**' blocks.
 """
@@ -16,6 +15,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+
+from .edition import render
 
 SECTION = re.compile(r"^## (\d+)\.", re.M)
 BLOCK_HEAD = re.compile(r"^(?:- )?\*\*((?:[A-Z]+-)?[A-Z]{1,2}\d+)\b")
@@ -60,14 +61,14 @@ def _first_sentence(block: str) -> str:
 
 
 def index(path: Path) -> str:
-    text = path.read_text(encoding="utf-8")
+    text = render(path.read_text(encoding="utf-8"), core=False)
     secs = _sections(text)
     head = text[: secs[0][1]] if secs else text
     head = head.split("\n---", 1)[0].rstrip()
     blocks = _blocks(text)
     rules = [b for k, b in blocks.items() if re.match(r"[A-Z]+-R\d+$", k)]
     out = [head, "", f"Progressive index of {path.name}: read the rules below in full; fetch any skill, "
-           "workflow, lesson or numbered section with protocol_section(file, key), e.g. key 'DT-S8' or '5'.",
+           "workflow, lesson or numbered section with protocol_section(file, key), e.g. a block id or '5'.",
            "", "## Sections"]
     for n, s, _ in secs:
         out.append("- " + text[s:text.index("\n", s)].lstrip("# ").strip())
@@ -81,7 +82,7 @@ def index(path: Path) -> str:
 
 
 def section(path: Path, key: str) -> dict[str, str | list[str]]:
-    text = path.read_text(encoding="utf-8")
+    text = render(path.read_text(encoding="utf-8"), core=False)
     k = key.strip().lstrip("§").strip()
     if k.isdigit():
         for n, s, e in _sections(text):
