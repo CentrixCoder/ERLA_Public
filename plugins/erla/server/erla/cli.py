@@ -380,7 +380,7 @@ def cmd_search(a) -> int:
         tiers=[t.strip().upper() for t in a.tier.split(",")] if a.tier else None,
         year_min=a.year_min, discipline=a.discipline, exclude_flagged=a.exclude_flagged,
         boosts=report.feedback_boosts(cfg), cfg=cfg, hybrid=not a.no_vector,
-        rerank=False if a.no_rerank else None)
+        rerank=False if a.no_rerank else None, reranker=a.reranker)
     idx_date = store.get_meta(con, "last_index_at")
     hd = [h.as_dict() for h in hits]
     payload = {"query": a.query, "index_date": idx_date, "mode": mode, "expanded": exp.describe(), "hits": hd}
@@ -624,8 +624,24 @@ def cmd_eval(a) -> int:
     golden = Path(a.golden) if a.golden else cfg.agent_root / "eval" / "golden_queries.yaml"
     if not golden.is_file():
         golden = core_dir() / "eval" / "golden_queries.yaml"
-    res = run_eval(con, cfg, golden, hybrid=not a.no_vector, rerank=False if a.no_rerank else None)
+    res = run_eval(con, cfg, golden, hybrid=not a.no_vector, rerank=False if a.no_rerank else None,
+                   reranker=a.reranker, memory=a.memory)
     _out(json.dumps(res, indent=2, default=str))
+    return 0
+
+
+def cmd_memory(a) -> int:
+    from . import memory
+    cfg = _cfg()
+    if a.action == "forget":
+        if not a.entry:
+            sys.exit("give the entry id to forget (erla memory list shows them)")
+        if not memory.forget(cfg, a.entry):
+            sys.exit(f"no source-memory entry {a.entry}")
+        _out(f"forgotten: {a.entry}")
+        return 0
+    for e in memory.load(cfg):
+        _out(f"{e['id']}  doc {e['doc_id']} {e['locator']}  [{' '.join(e['topic'])}]  {e['evidence']}  {e['ts']}")
     return 0
 
 
@@ -757,6 +773,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--export", help="write out/<NAME>.json and .csv")
     s.add_argument("--no-vector", action="store_true", help="BM25 only (disable dense retrieval)")
     s.add_argument("--no-rerank", action="store_true", help="skip the cross-encoder re-ranker (A1)")
+    s.add_argument("--reranker", help="ms-marco (default, CPU, fast), bge-v2-m3 (CPU, slower), qwen3-4b (GPU), custom")
     s.set_defaults(fn=cmd_search)
 
     s = sub.add_parser("props", help="query extracted material properties (A3); cite the locator, not this table")
@@ -813,7 +830,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--golden")
     s.add_argument("--no-vector", action="store_true")
     s.add_argument("--no-rerank", action="store_true", help="measure without the cross-encoder (A1)")
+    s.add_argument("--reranker", help="measure this re-ranker instead of the site's (see erla search --reranker)")
+    s.add_argument("--memory", action="store_true", help="include the source memory (off: it would learn the answers)")
     s.set_defaults(fn=cmd_eval)
+
+    s = sub.add_parser("memory", help="source memory: list what verified answers taught the ranking, or forget one")
+    s.add_argument("action", choices=["list", "forget"])
+    s.add_argument("entry", nargs="?", help="entry id to forget")
+    s.set_defaults(fn=cmd_memory)
 
     s = sub.add_parser("webcheck", help="check a query is safe to send to the web (G2)")
     s.add_argument("query")

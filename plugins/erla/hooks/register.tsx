@@ -5,8 +5,8 @@ import type { FileHit, LibraryView, PanelSettings, PanelView, Progress, Source }
 import { explain, splitPaths } from './library'
 import type { AddResult, RemoveResult, SiteInfo, StatusResult } from './library'
 import {
-  askPrompt, DEFAULT_SETTINGS, filesFrom, openPrompt, parseStats, preferencesSection, readSettings, referencesMarkdown, resultText,
-  scopeBlock, sourceFromShow,
+  askPrompt, DEFAULT_SETTINGS, filesFrom, isReranker, openPrompt, parseStats, preferencesSection, readSettings, referencesMarkdown,
+  RERANKER_OPTIONS, rerankerArgs, resultText, scopeBlock, sourceFromShow,
 } from './panel'
 
 const live = atom({ plugin: 'erla', key: 'live' } as const, null)
@@ -271,7 +271,7 @@ export const register: Register = on => {
     if (blocked) return { deny: blocked }
     let input = e
     if (SEARCH_TOOL.test(e.tool)) {
-      input = { ...e, ...(s.excludeRestricted ? { exclude_flagged: true } : {}), ...(s.semantic ? {} : { hybrid: false }) }
+      input = { ...e, ...(s.excludeRestricted ? { exclude_flagged: true } : {}), ...(s.semantic ? {} : { hybrid: false }), ...rerankerArgs(s) }
     }
     const result = next(input)
     if (STARTS_JOB.test(e.tool)) {
@@ -609,6 +609,22 @@ async function listFiles($: EngineInterface, query: string): Promise<void> {
   })
 }
 
+type RerankerStatus = { key: string; label?: string; available: boolean; reason?: string; fix?: string }
+
+// a GPU re-ranker is applied only when ERLA reports it can run here; otherwise the panel says why and how to fix it
+function chooseReranker($: EngineInterface, value: string): Promise<void> {
+  if (!isReranker(value)) return Promise.resolve()
+  if (value === 'default') return changeSettings($, { reranker: 'default' })
+  return panelAct($, 'Checking the re-ranker…', async () => {
+    const st = await call<{ rerankers: RerankerStatus[] }>($, 'reranker_status')
+    const r = st.rerankers.find(x => x.key === value)
+    if (!r) throw new Error(`ERLA ${value} is not offered by this ERLA version; update ERLA.`)
+    if (!r.available) throw new Error(`${r.label ?? value}: ${r.reason ?? 'cannot run here'}${r.fix ? `\n${r.fix}` : ''}`)
+    await changeSettings($, { reranker: value })
+    await say($, `${r.label ?? value} will re-rank library searches.`, false)
+  })
+}
+
 async function changeSettings($: EngineInterface, change: Partial<PanelSettings>): Promise<void> {
   const next = await update($, settings, s => ({ ...s, ...change }))
   try {
@@ -819,6 +835,13 @@ function registerPanel(on: Parameters<Register>[0]): void {
             value={s.units}
             options={UNIT_VALUES.map(u => ({ value: u, label: unitLabel(u) }))}
             onSelect={value => void changeSettings($, { units: value === 'US' || value === 'SI' ? value : 'config' })}
+          />,
+          <Select
+            key="reranker"
+            label="Re-ranker: "
+            value={s.reranker}
+            options={RERANKER_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
+            onSelect={value => void chooseReranker($, value)}
           />,
           <Box key="toggles" flexDirection="column" marginTop={1}>
             {toggle('semantic', s.semantic, 'Semantic search', () => void changeSettings($, { semantic: !s.semantic }))}

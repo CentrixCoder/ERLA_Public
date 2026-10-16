@@ -3,7 +3,23 @@
 
 import type { FileHit, PanelSettings, PanelView, Source } from '../types'
 
-export const DEFAULT_SETTINGS: PanelSettings = { units: 'config', semantic: true, excludeRestricted: false, scope: 'both' }
+export const DEFAULT_SETTINGS: PanelSettings = { units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default' }
+
+// the control panel's re-ranker choices; the GPU ones need PyTorch with CUDA (erla rerank.status)
+export const RERANKER_OPTIONS = [
+  { value: 'default', label: 'ms-marco MiniLM (default, fast)' },
+  { value: 'bge-v2-m3', label: 'BGE reranker v2-m3 (CPU, slower)' },
+  { value: 'qwen3-4b', label: 'Qwen3-Reranker 4B (GPU)' },
+] as const
+
+export function isReranker(v: unknown): v is PanelSettings['reranker'] {
+  return RERANKER_OPTIONS.some(o => o.value === v)
+}
+
+// the library_search argument the panel's re-ranker choice adds (none for the default)
+export function rerankerArgs(s: PanelSettings): { reranker?: string } {
+  return s.reranker === 'default' ? {} : { reranker: s.reranker }
+}
 
 // a stored value from an older or hand-edited store falls back field by field
 export function readSettings(stored: unknown): PanelSettings {
@@ -13,6 +29,7 @@ export function readSettings(stored: unknown): PanelSettings {
     semantic: typeof s.semantic === 'boolean' ? s.semantic : DEFAULT_SETTINGS.semantic,
     excludeRestricted: typeof s.excludeRestricted === 'boolean' ? s.excludeRestricted : DEFAULT_SETTINGS.excludeRestricted,
     scope: s.scope === 'local' || s.scope === 'web' ? s.scope : 'both',
+    reranker: isReranker(s.reranker) ? s.reranker : 'default',
   }
 }
 

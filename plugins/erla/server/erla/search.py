@@ -21,6 +21,9 @@ STOPWORDS = {
     "this", "which", "documents", "document", "files", "file", "related", "information", "data",
 }
 TIER_BOOST = {"T1": 1.30, "T2": 1.20, "T3": 1.10, "T4": 1.00, "T5": 0.90, "T6": 0.80}
+# re-ranked score = relevance x prior^BOOST_POWER (`rerank.boost_power` overrides): 1.5 since 0.4.0, after the
+# ranking fit and the eval improved both golden sets over 1.0 (scripts/fit_ranker.py; 2026-10-16)
+BOOST_POWER = 1.5
 VALUE_WORDS = re.compile(r"\b(value|allowable|strength|modulus|kt|kf|fty|ftu|fsu|fbru|coefficient|factor|"
                          r"\d+(?:\.\d+)?)\b", re.I)
 TOKEN_SPLIT = re.compile(r"[^\w\-./]+")
@@ -106,6 +109,8 @@ class Hit:
     snippets: list[str]
     rerank: float | None = None          # A1 cross-encoder relevance (0-1) when re-ranked
     warnings: list[str] = field(default_factory=list)   # A5/A6 quality flags of the cited chunks
+    memory: dict | None = None           # 0.4.0 source memory: verified answers on this topic (erla.memory)
+    boost: float | None = None           # 0.4.0 prior multiplier (tier, standard, OCR, feedback, memory) when re-ranked
 
     def as_dict(self) -> dict:
         return dict(self.__dict__)
@@ -126,7 +131,8 @@ def _snippet(text: str, words: list[str], width: int = 320) -> str:
 def search(con, query: str, k: int = 20, types: list[str] | None = None, tiers: list[str] | None = None,
            year_min: int | None = None, discipline: str | None = None, exclude_flagged: bool = False,
            include_duplicates: bool = False, boosts: dict[int, float] | None = None,
-           cfg=None, hybrid: bool = True, rerank: bool | None = None) -> tuple[list[Hit], Expansion, str]:
+           cfg=None, hybrid: bool = True, rerank: bool | None = None,
+           reranker: str | None = None, memory: bool = True) -> tuple[list[Hit], Expansion, str]:
     exp = expand(query)
     words = [v for g in exp.groups for v in g] + exp.terms
     std_q, _ = detect_standard(query.upper())
@@ -253,15 +259,59 @@ def search(con, query: str, k: int = 20, types: list[str] | None = None, tiers: 
             standard_id=m["standard_id"], revision=m["revision"], ocr_used=bool(m["ocr_used"]),
             duplicates=dup_count.get(did, 0), locators=[t[1] for t in top],
             snippets=[_snippet(t[2], words) for t in top], warnings=warn))
+    if memory and cfg is not None and hits:
+        from . import memory as mm
+        known = mm.prior(cfg, con, query, [h.doc_id for h in hits])
+        for h in hits:                    # only documents already found and kept by the filters above
+            m = known.get(h.doc_id)
+            if m:
+                h.score = round(h.score * m["factor"], 3)
+                h.memory = m
+        if known:
+            mode += "+memory"
     hits.sort(key=lambda h: -h.score)
     use_rr = rerank if rerank is not None else rr.enabled(cfg)
     if use_rr and hits and cfg is not None:
         try:
-            hits = _rerank(cfg, query, words, hits, texts, base)
-            mode += "+rerank"
+            hits, used = _rerank(cfg, query, words, hits, texts, base, reranker)
+            mode += f"+rerank[{used}]"
+            if (cfg.rerank or {}).get("tier_first"):
+                hits = tier_first(hits)
+                mode += "+tier_first"
         except Exception as exc:          # model missing/offline: keep the fused ranking, say so
             mode += f"+rerank_failed({type(exc).__name__})"
     return hits[:k], exp, mode
+
+
+RELEVANT_SHARE = 0.5      # a re-ranked hit is "relevant" at >= half the top hit's re-ranker relevance
+
+
+def relevant_set(hits: list[Hit]) -> list[Hit]:
+    """Re-ranked hits whose relevance is at least RELEVANT_SHARE of the best one (none without re-ranking)."""
+    scored = [h for h in hits if h.rerank is not None]
+    if not scored:
+        return []
+    top = max(h.rerank or 0.0 for h in scored)
+    return [h for h in scored if (h.rerank or 0.0) >= RELEVANT_SHARE * top and top > 0]
+
+
+def tier_first(hits: list[Hit]) -> list[Hit]:
+    """R1.1 within the relevant set: tier first, then score; the other hits keep their order below it."""
+    rel = relevant_set(hits)
+    ids = {id(h) for h in rel}
+    order = {f"T{i}": i for i in range(1, 7)}
+    rel.sort(key=lambda h: (order.get(h.tier, 9), -h.score))
+    return rel + [h for h in hits if id(h) not in ids]
+
+
+def tiers_view(hits: list[Hit]) -> dict:
+    """Primary source and the T1/T2 sources that corroborate it (two-tier results, 0.4.0)."""
+    rel = relevant_set(hits) or hits[:1]
+    if not rel:
+        return {"primary": None, "corroborating": []}
+    primary = hits[0] if hits[0] in rel else rel[0]
+    corro = [h.doc_id for h in rel if h is not primary and h.tier in ("T1", "T2")][:5]
+    return {"primary": primary.doc_id, "corroborating": corro}
 
 
 def _quality(qj) -> dict:
@@ -273,7 +323,8 @@ def _quality(qj) -> dict:
         return {}
 
 
-def _rerank(cfg, query: str, words: list[str], hits: list[Hit], texts: dict, base: dict) -> list[Hit]:
+def _rerank(cfg, query: str, words: list[str], hits: list[Hit], texts: dict, base: dict,
+            reranker: str | None = None) -> tuple[list[Hit], str]:
     """A1: re-order the top_n hits by cross-encoder relevance x the hit's own boosts (tier, standard
     number, OCR, feedback); hits below top_n keep their order beneath the re-ranked block."""
     r = cfg.rerank or {}
@@ -285,18 +336,20 @@ def _rerank(cfg, query: str, words: list[str], hits: list[Hit], texts: dict, bas
         for t in texts.get(h.doc_id, [])[:2]:
             passages.append(rr.window(t, words, size=size))
             owner.append(i)
-    scores = rr.score(cfg, query, passages)
+    scores, used = rr.score(cfg, query, passages, reranker)
     best: dict[int, float] = {}
     for o, s in zip(owner, scores):
         best[o] = max(best.get(o, 0.0), s)
+    power = float(r.get("boost_power", BOOST_POWER))   # 0: re-ranker only; 1: priors as multipliers (0.3.x)
     for i, h in enumerate(head):
         boost = h.score / max(base.get(h.doc_id, 0.0), 1e-9)
         h.rerank = round(best.get(i, 0.0), 4)
-        h.score = round(100.0 * h.rerank * boost, 3)
+        h.boost = round(boost, 4)
+        h.score = round(100.0 * h.rerank * boost ** power, 3)
     head.sort(key=lambda h: -h.score)
     if tail:
         floor = min(h.score for h in head)
         top_tail = max(h.score for h in tail) or 1.0
         for h in tail:
             h.score = round(floor * 0.99 * h.score / top_tail, 3)
-    return head + tail
+    return head + tail, used

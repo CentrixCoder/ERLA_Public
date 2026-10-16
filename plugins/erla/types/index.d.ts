@@ -41,6 +41,8 @@ export type PanelSettings = {
   // where answers come from: 'local' the library only (web tools blocked), 'web' the web only
   // (ERLA's library tools blocked), 'both' the library first and the web for gaps (ERLA's default)
   scope: 'local' | 'web' | 'both'
+  // library_search re-ranker: 'default' (BGE v2-m3 on the CPU) or a GPU LLM re-ranker (PyTorch + CUDA)
+  reranker: 'default' | 'bge-v2-m3' | 'qwen3-4b'
 }
 
 // a document opened with library_show this session, for feedback and the reference list

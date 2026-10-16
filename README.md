@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.9-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,31 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.4.0
+
+In short: better search at the same speed, values read from charts in your library (refused when a chart
+cannot be read reliably), and a choice of re-rankers. Every value ERLA reports is still checked against
+its source before it reaches you.
+- **Better search ranking at the same speed.** Searches put the right source first more often and find
+  more of the right documents in the top 10, with no slowdown and nothing ranked worse on our test queries
+  (ranking score 0.758 to 0.782 on material-property questions, right document in the top 10 from 94 % to
+  97 %).
+- **Choose your re-ranker.** The control panel has a re-ranker setting. The default stays fast. BGE
+  reranker v2-m3 (CPU, about 5x slower, downloads 0.57 GB once) finds more of the right documents for
+  broad research questions. With an NVIDIA graphics card (about 10 GB of memory) and PyTorch, you can
+  pick Qwen3-Reranker-4B, the best for broad research questions; for material values the default ranks
+  better. If your computer cannot run a choice, the panel says why and how to fix it.
+- **Primary and corroborating sources.** Each search names the best-supported source and the
+  high-authority sources that confirm it.
+- **Source memory.** Values that passed verification help later searches on the same topic find the
+  same document again. Memory never adds documents and is dropped when a file changes.
+- **Chart reading that refuses rather than guesses.** ERLA can read a value off a figure in your
+  library, but only when the axes, the curve and the point are clear; otherwise it says why it refused
+  and where else the same figure appears. It never extrapolates or reads between curves, and printed
+  equations and tables come first.
+- **Search quality score.** `erla eval` reports nDCG@10, a standard ranking score, and can compare
+  re-rankers on your own golden queries.
+
 ### 0.3.9
 
 - Maintenance release: no changes in the free edition.
@@ -25,10 +50,6 @@ Updated automatically at every release; older versions are listed under
 - **Authority tiers explained.** The README has a new section on the six source tiers, T1 to T6. It
   covers what each tier means, how ERLA ranks sources and rates confidence by tier, how a tier is
   assigned, and how to filter results by tier.
-
-### 0.3.7
-
-- Maintenance release; no user-facing notes were written for this version.
 
 <!-- release-notes:end -->
 

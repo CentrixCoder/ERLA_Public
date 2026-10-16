@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import {
-  askPrompt, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, readSettings, referencesMarkdown, resultText,
+  askPrompt, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, readSettings, referencesMarkdown, rerankerArgs, resultText,
   scopeBlock, sourceFromShow,
 } from './panel'
 
@@ -53,8 +53,13 @@ test('helpers: stats, sources, file lists, references, preferences', () => {
   expect(md).toMatch(/2\. Fitting allowables \(T1, \*\*ITAR\*\*\)/)
   expect(md).toMatch(/Contains restricted documents/)
 
-  expect(readSettings(undefined)).toEqual({ units: 'config', semantic: true, excludeRestricted: false, scope: 'both' })
-  expect(readSettings({ units: 'SI', semantic: 'yes', scope: 'local' })).toEqual({ units: 'SI', semantic: true, excludeRestricted: false, scope: 'local' })
+  expect(readSettings(undefined)).toEqual({ units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default' })
+  expect(readSettings({ units: 'SI', semantic: 'yes', scope: 'local' })).toEqual({ units: 'SI', semantic: true, excludeRestricted: false, scope: 'local', reranker: 'default' })
+  expect(readSettings({ reranker: 'qwen3-4b' }).reranker).toBe('qwen3-4b')
+  expect(readSettings({ reranker: 'gpt-reranker' }).reranker).toBe('default')     // unknown value from an old or edited store
+  expect(rerankerArgs(readSettings(undefined))).toEqual({})
+  expect(rerankerArgs(readSettings({ reranker: 'qwen3-4b' }))).toEqual({ reranker: 'qwen3-4b' })
+  expect(readSettings({ reranker: 'bge-gemma' }).reranker).toBe('default')       // dropped in 0.4.0
   expect(preferencesSection(readSettings(undefined))).toBe(null)
   const pref = preferencesSection({ units: 'SI', semantic: false, excludeRestricted: true }) ?? ''
   expect(pref).toMatch(/Use SI as the project unit system/)
@@ -65,7 +70,7 @@ test('helpers: stats, sources, file lists, references, preferences', () => {
 // a fake engine with ERLA behind it; records what the panel and Claude's tool calls did
 function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
   mock.clock(on)
-  const rec = { mcp: [] as string[], searches: [] as Record<string, unknown>[], prompts: [] as string[], store: {} as Record<string, unknown>, refuse: '', reached: [] as string[] }
+  const rec = { mcp: [] as string[], searches: [] as Record<string, unknown>[], prompts: [] as string[], store: {} as Record<string, unknown>, refuse: '', reached: [] as string[], gpuReady: false }
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:erla:erla' } }))
   on('mcp.call', ($, e) => {
@@ -78,6 +83,14 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
       index_start: { state: 'running' },
       library_files: { inventory: { handbook: [{ doc_id: 1, title: 'Roark', path: 'Roark.pdf', tier: 'T2', flag: null }], spec: [{ doc_id: 2, title: 'Fitting allowables', path: 'ITAR/X.pdf', tier: 'T1', flag: 'ITAR' }] } },
       record_feedback: { logged_to: 'feedback.jsonl' },
+      reranker_status: { default: 'ms-marco', rerankers: [
+        { key: 'ms-marco', label: 'ms-marco MiniLM (default, CPU, fast)', available: true },
+        { key: 'bge-v2-m3', label: 'BGE reranker v2-m3 (CPU, slower)', available: true },
+        rec.gpuReady
+          ? { key: 'qwen3-4b', label: 'Qwen3-Reranker 4B (GPU)', available: true }
+          : { key: 'qwen3-4b', label: 'Qwen3-Reranker 4B (GPU)', available: false,
+              reason: 'PyTorch with CUDA needs to be installed for this re-ranker (torch and transformers not found).', fix: 'pip install torch' },
+      ] },
       export_packet: { written: ['C:\\ERLA\\out\\references.md'] },
     }
     return { value: { content: [{ type: 'text', text: JSON.stringify(out[e.tool] ?? {}) }], isError: false } }
@@ -157,7 +170,7 @@ test('toggles persist, reach library_search and the system prompt, and filter Li
   await ui.press({ key: 'restricted' })
   await ui.press({ key: 'semantic' })
   await ui.select({ key: 'units', value: 'SI' })
-  expect(rec.store.settings).toEqual({ units: 'SI', semantic: false, excludeRestricted: true, scope: 'both' })
+  expect(rec.store.settings).toEqual({ units: 'SI', semantic: false, excludeRestricted: true, scope: 'both', reranker: 'default' })
   expect(await ui.find({ type: 'Button', text: /☑ Leave out restricted documents/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /☐ Semantic search/ })).toBeDefined()
 
@@ -171,6 +184,35 @@ test('toggles persist, reach library_search and the system prompt, and filter Li
   await ui.press({ key: 'files' })
   expect(await ui.find({ type: 'Text', text: /Fitting allowables/ })).toBe(undefined)
   expect(await ui.find({ type: 'Text', text: /restricted documents left out/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('re-ranker choice: GPU ones only when ERLA says they can run, then sent with every library_search', async ($, on) => {
+  const rec = fake(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+
+  await ui.select({ key: 'reranker', value: 'qwen3-4b' })
+  expect(await ui.find({ type: 'Text', text: /PyTorch with CUDA needs to be installed/ })).toBeDefined()
+  expect(rec.store.settings).toBe(undefined)                       // refused: nothing saved, default stays
+  await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_search', query: 'Kt' } as never)
+  expect(rec.searches[0]).not.toHaveProperty('reranker')
+
+  rec.gpuReady = true                                              // PyTorch + CUDA installed, ERLA restarted
+  await ui.select({ key: 'reranker', value: 'qwen3-4b' })
+  expect(rec.store.settings).toMatchObject({ reranker: 'qwen3-4b' })
+  await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_search', query: 'Kt' } as never)
+  expect(rec.searches[1]).toMatchObject({ query: 'Kt', reranker: 'qwen3-4b' })
+
+  await ui.select({ key: 'reranker', value: 'bge-v2-m3' })            // the slower CPU option needs no GPU
+  expect(rec.store.settings).toMatchObject({ reranker: 'bge-v2-m3' })
+  await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_search', query: 'Kt' } as never)
+  expect(rec.searches[2]).toMatchObject({ query: 'Kt', reranker: 'bge-v2-m3' })
+
+  await ui.select({ key: 'reranker', value: 'default' })
+  await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_search', query: 'Kt' } as never)
+  expect(rec.searches[3]).not.toHaveProperty('reranker')
   await ui.unmount()
 })
 

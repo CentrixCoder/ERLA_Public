@@ -40,7 +40,7 @@ import json
 import math
 import re
 import sqlite3
-from typing import Any
+from typing import Any, cast
 
 from .classify import copy_group_flags, effective_flag
 
@@ -507,8 +507,41 @@ def _check_computed(item: dict[str, Any], res: dict[str, Any], calc_runs: dict[s
                                          + (f" x {scale:g}" if scale != 1 else "") + f" = {expect:.6g}")
 
 
+def _check_chart(con: sqlite3.Connection, cfg: Any, item: dict[str, Any], res: dict[str, Any]) -> None:
+    """A chart reading passes only if the figure, read again through every gate, gives the same value
+    within the reading's own uncertainty (Plan B, 0.4.0)."""
+    from .chart import read_chart
+    if cfg is None:
+        res.update(status="FAIL", reason="chart items are checked by the server (chart_read)")
+        return
+    try:
+        doc_id, locator, x = int(item["doc_id"]), str(item["locator"]), float(item["x"])
+        color = item["color"]
+    except (KeyError, TypeError, ValueError):
+        res.update(status="FAIL", reason="chart items need doc_id, locator, x, color and value")
+        return
+    found = numbers(str(item.get("value") or ""))
+    if not found:
+        res.update(status="FAIL", reason="value has no number")
+        return
+    region = item.get("region")
+    r = read_chart(con, cfg, doc_id, locator, x, color,
+                   region=[float(v) for v in cast(list[Any], region)] if isinstance(region, list) else None,
+                   cross_check=bool(item.get("cross_check")))
+    if r.get("status") != "READ":
+        res.update(status="FAIL", reason=f"chart not readable: {r.get('reason')}")
+        return
+    v, y, dy = found[0][0], float(r["y"]), float(r["uncertainty"])
+    res["chart"] = {"y": y, "uncertainty": dy, "x": x}
+    if abs(v - y) <= dy * (1 + 1e-9):
+        res.update(status="PASS", evidence=f"chart re-read at x = {x:g}: {y:.4g} +/- {dy:.2g}")
+        res["warnings"].append("chart reading: lower confidence than a printed value (rules section 2)")
+    else:
+        res.update(status="FAIL", reason=f"{v:g} is not the chart's {y:.4g} +/- {dy:.2g} at x = {x:g}")
+
+
 def verify_items(con: sqlite3.Connection, items: list[dict[str, Any]],
-                 calc_runs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+                 calc_runs: dict[str, dict[str, Any]] | None = None, cfg: Any = None) -> dict[str, Any]:
     """``calc_runs``: calculation runs recorded by the server (erla.calcrun), by calc_id."""
     results: list[dict[str, Any]] = []
     docs: dict[int, _Doc] = {}
@@ -525,8 +558,11 @@ def verify_items(con: sqlite3.Connection, items: list[dict[str, Any]],
         if kind == "computed":
             _check_computed(item, res, calc_runs or {})
             continue
+        if kind == "chart":
+            _check_chart(con, cfg, item, res)
+            continue
         if kind not in ("value", "quote"):
-            res.update(status="FAIL", reason=f"unknown kind {kind!r} (value, quote, computed)")
+            res.update(status="FAIL", reason=f"unknown kind {kind!r} (value, quote, computed, chart)")
             continue
         try:
             doc_id = int(item["doc_id"])

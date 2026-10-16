@@ -70,7 +70,7 @@ erla site / erla config                   site folder, library folders, validati
 
 Search and read
 erla search "<query>" [--type pdf,xlsx] [--tier T1,T2] [--year-min 2000] [--k 20]
-            [--format md|json|table] [--exclude-flagged] [--no-vector] [--no-rerank] [--export NAME]
+            [--format md|json|table] [--exclude-flagged] [--no-vector] [--no-rerank] [--reranker ms-marco|bge-v2-m3|qwen3-4b] [--export NAME]
 erla show <doc_id> [--locator "p.287"] [--context 1]   chunk text at locator; '!!' lines = quality flags
 erla props <qty> [--material] [--temper] [--form] [--basis A|B|S] [--direction L|LT|ST] [--tier]
                                           property index (A3): rows point to locators; read them before citing (R3.3)
@@ -92,7 +92,8 @@ erla reclassify [--dry-run]               K3: re-apply authority-tier and doc-ty
 erla embed                                embeddings for new chunks + vector index export
 erla cache [--seed]                       legacy .doc/.ppt/.xls extract cache
 erla fts [--rebuild]                      full-text index integrity check / repair
-erla eval                                 golden-query evaluation (Recall@5/10, MRR)
+erla eval [--reranker ..] [--memory]       golden-query evaluation (nDCG@10, primary@1, Recall@5/10, MRR, s/query)
+erla memory list | forget <id>            source memory: what verified answers taught the ranking
 erla config / erla site                   resolved configuration / site status
 ```
 Read commands open the index read-only and never wait for a running refresh; only maintenance commands write to it.

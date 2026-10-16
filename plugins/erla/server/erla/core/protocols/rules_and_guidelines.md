@@ -12,7 +12,7 @@
 | T6 | Unvetted web | Forums, blogs, Q&A sites, Wikipedia | Low — lead only, never a value source |
 
 Rules:
-- R1.1 Rank results by tier first, then relevance score, then recency.
+- R1.1 Rank results by tier first, then relevance score, then recency. Search ranks by relevance with tier as a prior and names the relevant T1/T2 hits (`primary`, `corroborating`); the Ranked Sources section (§6 C) lists the relevant sources tier first. The site setting `rerank.tier_first` makes search itself order the relevant set tier first.
 - R1.2 A T6 source may point to a primary source; cite the primary, not the T6 page.
 - R1.3 Design values must come from T1–T3. If only T4–T6 available, say so explicitly.
 
@@ -22,7 +22,7 @@ Rules:
 |---|---|
 | HIGH | T1–T2, current revision, value read directly from text/table, conditions match the query |
 | MEDIUM | T3–T4, or T1–T2 with condition mismatch (temp, thickness, form), or older revision not confirmed superseded |
-| LOW | T5–T6, OCR-derived, interpolated from a chart, or single uncorroborated source |
+| LOW | T5–T6, OCR-derived, read from a chart (`CHART-READ`, `chart_read` with every gate passed), or single uncorroborated source |
 
 Downgrade one level for: OCR, chart digitization, unit conversion performed by ERLA, revision unknown.
 
@@ -119,7 +119,7 @@ Purpose: keep the agent's protocols aligned with the toolkit, the library, the s
   - a config key is added, renamed, or removed;
   - site facts change (paths, Python/Office/Tesseract versions, embedding model, library composition change > 10% in file count or size);
   - a supersession is found for a standard named in the protocols or `synonyms.yaml`;
-  - `erla eval` shows a regression (Recall@10 or MRR drop > 0.05 vs the last run);
+  - `erla eval` shows a regression (nDCG@10, Recall@10 or MRR drop > 0.05 vs the last run on the same golden file and re-ranker);
   - ≥ 3 user corrections in the log trace to the same rule, synonym gap, or tier assignment;
   - a conflict or broken cross-reference between protocol files is detected during any request;
   - the operating platform changes (Claude tools, Desktop Commander, linking method);

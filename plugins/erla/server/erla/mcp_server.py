@@ -414,7 +414,7 @@ def t_library_stats() -> dict:
 
 def t_library_search(query: str, k: int = 20, types: list[str] | None = None, tiers: list[str] | None = None,
                      year_min: int | None = None, discipline: str | None = None,
-                     exclude_flagged: bool = False, hybrid: bool = True) -> dict:
+                     exclude_flagged: bool = False, hybrid: bool = True, reranker: str | None = None) -> dict:
     from . import report
     from .search import search
     cfg = _cfg()
@@ -423,9 +423,11 @@ def t_library_search(query: str, k: int = 20, types: list[str] | None = None, ti
         con, query, k=k, types=[t.lower().lstrip(".") for t in types] if types else None,
         tiers=[t.upper() for t in tiers] if tiers else None, year_min=year_min, discipline=discipline,
         exclude_flagged=exclude_flagged, boosts=report.feedback_boosts(cfg), cfg=cfg,
-        hybrid=hybrid and bool(cfg.embeddings.get("enabled")))
+        hybrid=hybrid and bool(cfg.embeddings.get("enabled")), reranker=reranker or None)
     last, age = _index_age_days(con)
     hd = [h.as_dict() for h in hits]
+    from .search import tiers_view
+    two_tier = tiers_view(hits)
     anomalies = []
     for i, h in enumerate(hd, 1):
         h["source_id"] = f"S{i}"
@@ -435,9 +437,27 @@ def t_library_search(query: str, k: int = 20, types: list[str] | None = None, ti
                             "flags": sorted({h["flag"] for h in hd if h.get("flag")})})
     return {"query": query, "index_date": last, "index_stale": age is None or age > cfg.stale_days,
             "mode": mode, "expanded_queries": exp.describe(), "hits": hd, "anomalies": anomalies,
+            "primary": two_tier["primary"], "corroborating": two_tier["corroborating"],
             "note": "Snippets are for ranking only. Open every hit you cite with library_show (R3.3). "
+                    "primary: the best-supported source for the query; corroborating: relevant T1/T2 sources "
+                    "to confirm it with (doc_ids among the hits). "
                     "Hits with a flag are local-only: never put their text, titles or file names in web "
                     "queries (G2)."}
+
+
+def t_chart_read(doc_id: int, locator: str, x: float, color: str, region: list[float] | None = None,
+                 cross_check: bool = False) -> dict:
+    from .chart import read_chart
+    cfg = _cfg()
+    return read_chart(_con(cfg), cfg, doc_id, locator, x, color, region=region, cross_check=cross_check)
+
+
+def t_reranker_status() -> dict:
+    """The re-rankers this install offers and whether each can run here (control panel drop-down)."""
+    from . import rerank
+    cfg = _cfg()
+    return {"default": rerank.DEFAULT, "site": rerank.selected(cfg),
+            "rerankers": [rerank.status(k) for k in rerank.RERANKERS]}
 
 
 def t_library_show(doc_id: int, locator: str | None = None, context: int = 0, chars: int = 6000) -> dict:
@@ -552,7 +572,14 @@ def t_verify_packet(items: list[dict]) -> dict:
     from .verify import verify_items
     cfg = _cfg()
     computed = any(str((i or {}).get("kind") or "") == "computed" for i in items if isinstance(i, dict))
-    out = verify_items(_con(cfg), items, _calc_runs(cfg) if computed else None)
+    con = _con(cfg)
+    out = verify_items(con, items, _calc_runs(cfg) if computed else None, cfg=cfg)
+    from . import memory
+    try:
+        out["remembered"] = memory.record_verified(cfg, con, [i if isinstance(i, dict) else {} for i in items],
+                                                   out["items"], out["verification_id"])
+    except Exception as exc:             # the memory is an aid: a failed write never fails a verification
+        out["remembered_error"] = type(exc).__name__
     report.append_log(cfg, {"cmd": "mcp.verify", "overall": out["overall"], "verification_id": out["verification_id"],
                             **{f"n_{k.lower()}": v for k, v in out["counts"].items()}})
     return out
@@ -764,7 +791,19 @@ def build_server():
     reg(t_library_search, "library_search", "Search the local engineering library index (BM25 + local "
         "embeddings, synonym expansion, tier ranking). Returns ranked hits with locators, tier, flag, "
         "snippets and the expanded query set. Filters: types (pdf, xlsx...), tiers (T1..T6), year_min, "
-        "discipline, exclude_flagged.", ro)
+        "discipline, exclude_flagged; reranker (ms-marco default; bge-v2-m3 CPU option; qwen3-4b needs a "
+        "CUDA GPU) is normally set by the user's control panel - do not choose one yourself.", ro)
+    reg(t_chart_read, "chart_read", "Read y at x on ONE curve of a library figure (PDF page), or refuse. "
+        "Gates: printed equation or table on the page first (G0; read only as cross_check), axis calibration "
+        "from OCR'd tick labels (G2/G3), no extrapolation beyond the curve (G4), the curve identified by colour "
+        "as one clean stroke (G5, color '#rrggbb'), small uncertainty (G6), never between curves or a family drawn in "
+        "one colour (G7), no rotated scan (G8), tick labels read with high OCR confidence (G9), the reading plotted "
+        "back lands on the curve (G10). "
+        "Returns READ with y and uncertainty, or REJECTED with the gate, the reason and alternatives (the same "
+        "figure caption in other documents: read the cleanest). Report a READ value through verify_packet as kind "
+        "'chart' with the same doc_id, locator, x and color; it ranks below printed values (rules section 2).", ro)
+    reg(t_reranker_status, "reranker_status", "The search re-rankers this install offers and whether each can "
+        "run on this computer (PyTorch, CUDA, GPU memory), with the fix when it cannot.", ro)
     reg(t_library_show, "library_show", "Open a document at a locator (e.g. 'p.287', 'Sheet1!A1:H40', "
         "'slide 12') and return the exact chunk text. Required before citing any value. Without a "
         "locator, lists the document's locators.", ro)
