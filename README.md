@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.8-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.3.9-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,10 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.3.9
+
+- Maintenance release: no changes in the free edition.
+
 ### 0.3.8
 
 - **Authority tiers explained.** The README has a new section on the six source tiers, T1 to T6. It
@@ -25,24 +29,6 @@ Updated automatically at every release; older versions are listed under
 ### 0.3.7
 
 - Maintenance release; no user-facing notes were written for this version.
-
-### 0.3.6
-
-- **New name.** ERLA is the Engineering Research Library Agent.
-- **First free public release.** The lead ERLA agent with full library search, verification, guardrails
-  and Result Packets. When a question falls in a specialist field (damage tolerance, joints and more
-  to come), the free version answers it as the lead agent and says in the Result Packet that no
-  specialist reviewed it.
-- **Stronger protection for restricted documents.** The web gate now blocks names and codes that
-  appear only in restricted (ITAR, EAR, CUI, proprietary) documents, including names inside the
-  documents, and sees through disguises such as spaced-out letters, look-alike letters, invisible
-  characters and encoded URLs. More part-number and email forms are caught.
-- **Better prompt-injection reporting.** Instructions hidden in library documents, including polite or
-  indirect ones, are reported as anomalies and never followed.
-- **Fairer authority tiers.** A document that only mentions a handbook or standard no longer gets that
-  document's tier.
-- **Honest estimates.** When you ask for an estimate, ERLA works from your inputs or values it verified,
-  and never states remembered figures as facts.
 
 <!-- release-notes:end -->
 
