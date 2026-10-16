@@ -4,7 +4,7 @@
     "name": "ERLA maintainers"
   },
   "description": "ERLA - Engineering Research Library Agent for local engineering libraries",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "plugins": [
     {
       "name": "erla",

@@ -403,13 +403,14 @@ def t_site_resurvey() -> dict:
 
 
 def t_library_stats() -> dict:
-    from . import cli
+    from . import cli, evaluate
     cfg = _cfg()
     con = _con(cfg)
     last, age = _index_age_days(con)
     return {"text": _capture(cli.cmd_stats, None), "index_date": last, "index_age_days": age,
             "stale": age is None or age > cfg.stale_days, "stale_days": cfg.stale_days,
-            "library_probe": __import__("erla.indexer", fromlist=["probe_library"]).probe_library(cfg, con)}
+            "library_probe": __import__("erla.indexer", fromlist=["probe_library"]).probe_library(cfg, con),
+            "last_eval": evaluate.last_run(cfg)}
 
 
 def t_library_search(query: str, k: int = 20, types: list[str] | None = None, tiers: list[str] | None = None,

@@ -5,8 +5,8 @@ import type { FileHit, LibraryView, PanelSettings, PanelView, Progress, Source }
 import { explain, splitPaths } from './library'
 import type { AddResult, RemoveResult, SiteInfo, StatusResult } from './library'
 import {
-  askPrompt, DEFAULT_SETTINGS, filesFrom, isReranker, openPrompt, parseStats, preferencesSection, readSettings, referencesMarkdown,
-  RERANKER_OPTIONS, rerankerArgs, resultText, scopeBlock, sourceFromShow,
+  askPrompt, CHART_HITS, DEFAULT_SETTINGS, evalFrom, filesFrom, isReranker, openPrompt, parseStats, preferencesSection, qualityLine,
+  readSettings, referencesMarkdown, RERANKER_OPTIONS, rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
 const live = atom({ plugin: 'erla', key: 'live' } as const, null)
@@ -263,7 +263,7 @@ export const register: Register = on => {
   // four jobs, every other call passed straight through untouched:
   // - the panel's "Search in" scope holds back web tools (library only) or ERLA's library tools (web only)
   // - the bar appears as soon as an index job is started from Claude, not at the next idle poll
-  // - library_search runs with the panel's search toggles
+  // - library_search runs with the panel's search toggles, and its top 10 feed the panel's relevance chart
   // - documents opened with library_show join the panel's session sources, with the pages cited
   on('tool.call', async ($, e, next) => {
     const s = await read($, settings)
@@ -276,6 +276,13 @@ export const register: Register = on => {
     const result = next(input)
     if (STARTS_JOB.test(e.tool)) {
       void result.then(() => kick?.()).catch(() => undefined)
+    }
+    if (SEARCH_TOOL.test(e.tool)) {
+      const query = (e as { query?: unknown }).query
+      void result.then(async r => {
+        const found = 'result' in r && !r.isError ? searchFrom(typeof query === 'string' ? query : '', resultText(r.result)) : null
+        if (found) await update($, lastSearch, () => found)
+      }).catch(() => undefined)
     }
     if (SHOW_TOOL.test(e.tool)) {
       const locator = (e as { locator?: unknown }).locator
@@ -501,7 +508,9 @@ const PANEL_TITLE = 'ERLA'
 const panel = atom({ plugin: 'erla', key: 'panel' } as const, null)
 const settings = atom({ plugin: 'erla', key: 'settings' } as const, DEFAULT_SETTINGS)
 const sources = atom({ plugin: 'erla', key: 'sources' } as const, [])
+const lastSearch = atom({ plugin: 'erla', key: 'lastSearch' } as const, null)
 const FILES_SHOWN = 8
+const RELEVANCE_BAR = 20
 const UNIT_VALUES = ['config', 'US', 'SI'] as const
 const SCOPE_OPTIONS = [
   { value: 'both', label: 'Library + web (library first)' },
@@ -516,6 +525,7 @@ const PANEL_EMPTY: PanelView = {
   vectors: null,
   configUnits: null,
   version: null,
+  lastEval: null,
   query: '',
   files: null,
   busy: null,
@@ -529,8 +539,8 @@ const say = ($: EngineInterface, text: string, isError = false) => setPanel($, {
 
 async function refreshStatus($: EngineInterface): Promise<void> {
   try {
-    const stats = await call<{ text?: string }>($, 'library_stats')
-    await setPanel($, parseStats(stats.text ?? ''))
+    const stats = await call<{ text?: string; last_eval?: unknown }>($, 'library_stats')
+    await setPanel($, { ...parseStats(stats.text ?? ''), lastEval: evalFrom(stats.last_eval) })
     await refresh($)
   } catch (err) {
     await say($, explain('library_stats', err), true)
@@ -684,9 +694,11 @@ function registerPanel(on: Parameters<Register>[0]): void {
     const list = await read($, sources)
     const job = await read($, live)
     const lib = (await read($, library)) ?? EMPTY
+    const ls = await read($, lastSearch)
+    const quality = qualityLine(v.lastEval)
 
     // theme colors, so the panel reads in light and dark themes alike
-    const ACCENT = { status: 'suggestion', search: 'claude', library: 'permission', settings: 'merged', sources: 'success' } as const
+    const ACCENT = { status: 'suggestion', search: 'claude', relevance: 'suggestion', library: 'permission', settings: 'merged', sources: 'success' } as const
     // one section: a rounded card with a colored title
     const card = (key: string, title: string, color: string, ...body: unknown[]) => (
       <Box key={key} flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} marginBottom={1}>
@@ -721,6 +733,7 @@ function registerPanel(on: Parameters<Register>[0]): void {
               ? <Text color={v.vectors > 0 ? 'success' : 'warning'}>{v.vectors > 0 ? `${v.vectors.toLocaleString()} vectors` : 'semantic search not built yet'}</Text>
               : null}
           </Box>,
+          <Text key="quality" color={quality.level === 'ok' ? 'success' : quality.level === 'weak' ? 'warning' : 'subtle'}>{quality.text}</Text>,
           job
             ? <Text key="job" color="suggestion">{`⟳ Indexing now: ${PHASE_LABEL[job.phase] ?? job.phase}${job.done !== null ? ` ${job.done}/${job.total}` : ''}`}</Text>
             : null,
@@ -764,6 +777,32 @@ function registerPanel(on: Parameters<Register>[0]): void {
                 {v.files.length > FILES_SHOWN ? <Text color="subtle">{`…and ${v.files.length - FILES_SHOWN} more`}</Text> : null}
               </Box>
             )
+            : null,
+        )}
+
+        {card('relevance', `Relevance: last search${ls ? ` (top ${Math.min(CHART_HITS, ls.hits.length)})` : ''}`, ACCENT.relevance,
+          !ls
+            ? <Text key="none" color="subtle">After ERLA searches the library, its top 10 sources appear here with how well each matches the question.</Text>
+            : null,
+          ls ? <Text key="query" color="subtle" wrap="truncate-end">{`"${ls.query}"`}</Text> : null,
+          ls && !ls.ranked
+            ? <Text key="unranked" color="warning">Not ranked by relevance: this search ran without the re-ranker (keyword or semantic order only), so no bars are drawn.</Text>
+            : null,
+          ls && ls.hits.length === 0 ? <Text key="empty" color="subtle">No library hits for this question.</Text> : null,
+          ...(ls ? ls.hits : []).map((r, i) => (
+            <Box key={`rel:${i}:${r.docId}`} gap={1}>
+              <Text color="subtle">{String(i + 1).padStart(2)}</Text>
+              {r.relevance !== null
+                ? <Text color={tierColor(r.tier)}>{bar(r.relevance, RELEVANCE_BAR)}</Text>
+                : ls?.ranked ? <Text color="subtle">{'·'.repeat(RELEVANCE_BAR)}</Text> : null}
+              {r.relevance !== null ? <Text bold>{r.relevance.toFixed(2)}</Text> : ls?.ranked ? <Text color="subtle"> -- </Text> : null}
+              <Text color={tierColor(r.tier)}>{r.tier ?? '--'}</Text>
+              {flagTag(r.flag)}
+              <Text wrap="truncate-end">{r.title}</Text>
+            </Box>
+          )),
+          ls && ls.ranked
+            ? <Text key="legend" color="subtle">Bar: how well the passage matches the question (re-ranker, 0–1). It does not check that a value is right; ERLA verifies values before a Result Packet. Order puts higher tiers first among relevant hits (R1.1).</Text>
             : null,
         )}
 

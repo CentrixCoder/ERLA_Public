@@ -84,6 +84,27 @@ def _value_in(con, hits, value: str) -> bool:
     return False
 
 
+MIN_GOLDEN = 30   # S14: fewer golden questions than this cannot tell re-rankers or changes apart
+
+
+def last_run(cfg: Config) -> dict | None:
+    """The latest recorded eval run, for the control panel's search-quality tile; None when there is none.
+    Runs recorded before nDCG@10 existed give ndcg@10 None, not 0 (no score is not a zero score)."""
+    hist = Path(cfg.log_dir) / "eval_history.jsonl"
+    try:
+        lines = hist.read_text(encoding="utf-8").strip().splitlines() if hist.is_file() else []
+        rec = json.loads(lines[-1]) if lines else None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    nd = rec.get("ndcg@10")
+    return {"ts": rec.get("ts"), "n": int(rec.get("n") or 0),
+            "ndcg@10": float(nd) if isinstance(nd, (int, float)) else None,
+            "recall@10": rec.get("recall@10"), "mrr": rec.get("mrr"), "reranker": rec.get("reranker"),
+            "min_questions": MIN_GOLDEN}
+
+
 def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool | None = None,
              reranker: str | None = None, record: bool = True, memory: bool = False) -> dict:
     items = yaml.safe_load(golden.read_text(encoding="utf-8")) or []

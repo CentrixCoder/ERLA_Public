@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.4.1-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,17 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.4.1
+
+In short: the control panel now shows how well each source matches your question.
+- **Relevance chart.** After ERLA searches your library, the control panel's new "Relevance: last search"
+  card lists the top 10 sources with a bar for how well each matches the question, colored by source
+  authority, with a warning mark on restricted documents. When a search ran without the re-ranker, the
+  card says so instead of drawing bars. The bar is about matching the question, not about whether a value
+  is right: ERLA still checks every value against its source.
+- **Search quality.** The Status card shows ERLA's score on your own test questions (nDCG@10) from the last
+  `erla eval` run, or "not measured yet", and warns when there are too few questions (under 30) to rely on.
+
 ### 0.4.0
 
 In short: better search at the same speed, values read from charts in your library (refused when a chart
@@ -44,12 +55,6 @@ its source before it reaches you.
 ### 0.3.9
 
 - Maintenance release: no changes in the free edition.
-
-### 0.3.8
-
-- **Authority tiers explained.** The README has a new section on the six source tiers, T1 to T6. It
-  covers what each tier means, how ERLA ranks sources and rates confidence by tier, how a tier is
-  assigned, and how to filter results by tier.
 
 <!-- release-notes:end -->
 

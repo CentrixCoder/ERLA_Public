@@ -3,8 +3,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import {
-  askPrompt, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, readSettings, referencesMarkdown, rerankerArgs, resultText,
-  scopeBlock, sourceFromShow,
+  askPrompt, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
+  rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
 const PANE_PROPS = {} as unknown as RenderPropsOf['Pane']
@@ -70,14 +70,14 @@ test('helpers: stats, sources, file lists, references, preferences', () => {
 // a fake engine with ERLA behind it; records what the panel and Claude's tool calls did
 function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
   mock.clock(on)
-  const rec = { mcp: [] as string[], searches: [] as Record<string, unknown>[], prompts: [] as string[], store: {} as Record<string, unknown>, refuse: '', reached: [] as string[], gpuReady: false }
+  const rec = { searchText: '{}', lastEval: null as unknown, mcp: [] as string[], searches: [] as Record<string, unknown>[], prompts: [] as string[], store: {} as Record<string, unknown>, refuse: '', reached: [] as string[], gpuReady: false }
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:erla:erla' } }))
   on('mcp.call', ($, e) => {
     if (e.tool !== 'index_status') rec.mcp.push(`${e.tool} ${JSON.stringify(e.args ?? {})}`)
     if (e.tool === rec.refuse) return { deny: 'The server-side auto mode classifier gave no verdict' }
     const out: Record<string, unknown> = {
-      library_stats: { text: STATS },
+      library_stats: { text: STATS, last_eval: rec.lastEval },
       site_info: { unit_system: 'US', library_roots: ['D:\\Lib'], erla_version: '0.2.9' },
       index_status: { status: { state: 'done' }, log_tail: [] },
       index_start: { state: 'running' },
@@ -99,7 +99,8 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
   on('tool.call', ($, e) => {
     rec.reached.push(e.tool)
     if (/library_search$/.test(e.tool)) rec.searches.push({ ...e })
-    const text = /library_show$/.test(e.tool) ? (e as { doc_id?: number }).doc_id === 99 ? SHOW_ITAR : SHOW : '{}'
+    const text = /library_show$/.test(e.tool) ? (e as { doc_id?: number }).doc_id === 99 ? SHOW_ITAR : SHOW
+      : /library_search$/.test(e.tool) ? rec.searchText : '{}'
     return { result: { content: [{ type: 'text', text }] } } as never
   })
   on('prompt.submit', ($, e) => {
@@ -341,5 +342,77 @@ test('a cited PDF gets its pages listed and an Open button that asks for the vie
   // a document without a PDF extension has no Open button
   await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_show', doc_id: 99 } as never)
   expect(await ui.find({ key: 'open:99' })).toBe(undefined)
+  await ui.unmount()
+})
+
+// library_search as ERLA 0.4.0 answers it: ERLA's order is tier first within the relevant set (R1.1), so a
+// T1 hit with lower relevance sits above a T3 one; `score` mixes in priors and is not a 0-1 relevance
+const hit = (doc_id: number, title: string, tier: string, rerank: number | null, score: number, flag: string | null = null) =>
+  ({ doc_id, title, path: `Lib/${title}.pdf`, tier, flag, rerank, score })
+const SEARCH = JSON.stringify({
+  query: '7075 Fty', mode: 'hybrid+rerank(bge-v2-m3)+tier_first',
+  hits: [hit(1, 'MMPDS-18', 'T1', 0.66, 87.3), hit(2, 'Alcoa data sheet', 'T3', 0.72, 91.0), hit(3, 'Fitting allowables', 'T1', 0.4, 40.2, 'ITAR'),
+    ...Array.from({ length: 9 }, (_, i) => hit(10 + i, `Extra ${i}`, 'T4', 0.1, 5))],
+})
+
+test('relevance chart helpers: re-ranker relevance only, ERLA order, top 10, honest about unranked searches', () => {
+  const s = searchFrom('7075 Fty', SEARCH)!
+  expect(s.ranked).toBe(true)
+  expect(s.hits.length).toBe(10)                                            // 12 hits -> the top 10
+  expect(s.hits.map(h => h.docId).slice(0, 3)).toEqual([1, 2, 3])           // ERLA's order kept, not re-sorted by relevance
+  expect(s.hits.map(h => h.relevance).slice(0, 3)).toEqual([0.66, 0.72, 0.4])  // never ERLA's blended score (87.3)
+  expect(s.hits[2]).toMatchObject({ flag: 'ITAR', tier: 'T1' })
+
+  const keyword = searchFrom('Kt', JSON.stringify({ mode: 'keyword', hits: [{ ...hit(1, 'Peterson', 'T2', null, 12), rerank: null }] }))!
+  expect(keyword).toMatchObject({ ranked: false, hits: [{ relevance: null }] })
+  // a re-ranker that failed leaves stale or zero scores: never charted as relevance
+  const failed = searchFrom('Kt', JSON.stringify({ mode: 'hybrid+rerank_failed(OSError)', hits: [hit(1, 'Peterson', 'T2', 0.0, 12)] }))!
+  expect(failed.ranked).toBe(false)
+  expect(searchFrom('Kt', JSON.stringify({ hits: [hit(1, 'X', 'T2', 1.7, 1), hit(2, 'Y', 'T2', -0.2, 1)] }))!.hits.map(h => h.relevance)).toEqual([1, 0])
+  expect(searchFrom('Kt', 'not json')).toBe(null)
+  expect(searchFrom('Kt', '{"error":"no index"}')).toBe(null)
+
+  expect(new Set(['T1', 'T2', 'T3', 'T4'].map(tierColor)).size).toBe(4)
+  expect(tierColor(null)).toBe('subtle')
+
+  expect(qualityLine(evalFrom(null)).level).toBe('none')
+  // a run recorded before nDCG@10 existed has no score: "not measured", never 0.00
+  expect(qualityLine(evalFrom({ ts: '2026-09-01T00:00:00+00:00', n: 40, 'ndcg@10': null })).level).toBe('none')
+  const weak = qualityLine(evalFrom({ ts: '2026-10-14T08:00:00+00:00', n: 3, 'ndcg@10': 0.912, reranker: 'ms-marco', min_questions: 30 }))
+  expect(weak).toEqual({ level: 'weak', text: 'Search quality: nDCG@10 0.91 (3 questions · 2026-10-14 · ms-marco). Too few questions to rely on: needs 30+.' })
+  expect(qualityLine(evalFrom({ ts: '2026-10-14T08:00:00+00:00', n: 42, 'ndcg@10': 0.81, min_questions: 30 })))
+    .toEqual({ level: 'ok', text: 'Search quality: nDCG@10 0.81 (42 questions · 2026-10-14)' })
+})
+
+test('the panel charts the last library_search Claude ran and shows the search-quality tile', async ($, on) => {
+  const rec = fake(on)
+  rec.lastEval = { ts: '2026-10-14T08:00:00+00:00', n: 3, 'ndcg@10': 0.9, reranker: 'ms-marco', min_questions: 30 }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+
+  expect(await ui.find({ type: 'Text', text: /Too few questions to rely on: needs 30\+/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /top 10 sources appear here/ })).toBeDefined()
+
+  rec.searchText = SEARCH
+  await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_search', query: '7075 Fty' } as never)
+  expect(await ui.find({ type: 'Text', text: /^Relevance: last search \(top 10\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^"7075 Fty"$/ })).toBeDefined()
+  for (const t of [/^0\.66$/, /^0\.72$/, /^MMPDS-18$/, /^⚠ ITAR$/, /^Extra 6$/, /does not check that a value is right/]) {
+    expect(await ui.find({ type: 'Text', text: t })).toBeDefined()
+  }
+  expect(await ui.find({ type: 'Text', text: /^87\.3$/ })).toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: /^Extra 7$/ })).toBe(undefined)    // the 11th and 12th hits are not drawn
+  expect(await ui.find({ type: 'Text', text: /^█{13}░{7}$/ })).toBeDefined()     // 0.66 of a 20-cell bar
+
+  rec.searchText = JSON.stringify({ mode: 'keyword', hits: [{ ...hit(1, 'Peterson', 'T2', null, 12), rerank: null }] })
+  await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_search', query: 'Kt' } as never)
+  expect(await ui.find({ type: 'Text', text: /^Not ranked by relevance/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Peterson$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^█/ })).toBe(undefined)            // no bars without re-ranker scores
+
+  rec.searchText = 'not json'                                                    // an unreadable answer keeps the last chart
+  await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_search', query: 'x' } as never)
+  expect(await ui.find({ type: 'Text', text: /^Peterson$/ })).toBeDefined()
   await ui.unmount()
 })

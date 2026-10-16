@@ -62,6 +62,34 @@ export type Source = {
 // one row of the panel's "List files" result (library_files)
 export type FileHit = { docId: number; title: string; path: string; tier: string | null; flag: string | null }
 
+// one bar of the panel's relevance chart: a library_search hit and its re-ranker relevance
+export type RankedHit = {
+  docId: number
+  title: string
+  tier: string | null
+  flag: string | null
+  // the re-ranker's 0-1 match of the passage to the question; null when the hit was not re-ranked
+  relevance: number | null
+}
+
+// the last library_search Claude ran, top 10 in ERLA's order (tier first within the relevant set, R1.1)
+export type LastSearch = {
+  query: string
+  // false when no hit carries a re-ranker score (keyword-only search, re-ranker off or failed)
+  ranked: boolean
+  hits: RankedHit[]
+}
+
+// library_stats' last_eval: the latest golden-set run, for the search-quality tile
+export type EvalSummary = {
+  ndcg10: number | null
+  questions: number
+  date: string | null
+  reranker: string | null
+  // golden questions needed before the score means anything (S14)
+  minQuestions: number
+}
+
 export type PanelView = {
   // library_stats, parsed
   indexState: string | null
@@ -71,6 +99,8 @@ export type PanelView = {
   configUnits: string | null
   // the running ERLA server's version (site_info erla_version), shown in the header
   version: string | null
+  // library_stats last_eval, parsed; null when no eval has been recorded
+  lastEval: EvalSummary | null
   query: string
   files: FileHit[] | null
   busy: string | null
@@ -86,6 +116,7 @@ declare module 'claude-code' {
       panel: PanelView | null
       settings: PanelSettings
       sources: Source[]
+      lastSearch: LastSearch | null
     }
   }
 }

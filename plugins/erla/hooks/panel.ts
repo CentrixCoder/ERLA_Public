@@ -1,7 +1,7 @@
 // Pure helpers for the /erla control panel in register.tsx (the engine follows $ only within
 // one file, so the panel's hooks live there).
 
-import type { FileHit, PanelSettings, PanelView, Source } from '../types'
+import type { EvalSummary, FileHit, LastSearch, PanelSettings, PanelView, RankedHit, Source } from '../types'
 
 export const DEFAULT_SETTINGS: PanelSettings = { units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default' }
 
@@ -179,4 +179,72 @@ export function askPrompt(query: string, scope: PanelSettings['scope'] = 'both')
   if (scope === 'local') return `Search the ERLA engineering library (library only, no web) and answer with a Result Packet: ${q}`
   if (scope === 'web') return `Research this on the web under ERLA's web rules (web only, not the library) and answer with a Result Packet: ${q}`
   return `Search the ERLA engineering library, then the web for any gaps, and answer with a Result Packet: ${q}`
+}
+
+// ------------------------------------------------------------------ relevance chart and search quality
+
+export const CHART_HITS = 10
+
+// library_search's answer -> the panel's relevance chart: the first 10 hits in ERLA's order.
+// `rerank` is the re-ranker's 0-1 match of the passage to the question; ERLA's own `score` mixes in
+// tier and other priors and is not on a 0-1 scale, so it is never charted.
+export function searchFrom(query: string, text: string | null): LastSearch | null {
+  if (!text) return null
+  let d: { hits?: unknown; mode?: unknown }
+  try {
+    d = JSON.parse(text) as { hits?: unknown; mode?: unknown }
+  } catch {
+    return null
+  }
+  if (!Array.isArray(d.hits)) return null
+  const failed = typeof d.mode === 'string' && d.mode.includes('rerank_failed')
+  const hits: RankedHit[] = (d.hits as Array<Record<string, unknown>>).slice(0, CHART_HITS).map(h => {
+    const r = h.rerank
+    const path = typeof h.path === 'string' ? h.path : ''
+    return {
+      docId: Number(h.doc_id),
+      title: typeof h.title === 'string' && h.title ? h.title : path.split(/[\/]/).pop() || `doc ${String(h.doc_id)}`,
+      tier: typeof h.tier === 'string' ? h.tier : null,
+      flag: typeof h.flag === 'string' && h.flag ? h.flag : null,
+      relevance: !failed && typeof r === 'number' && isFinite(r) ? Math.min(1, Math.max(0, r)) : null,
+    }
+  })
+  return { query, ranked: hits.some(h => h.relevance !== null), hits }
+}
+
+// one theme color per authority tier, so a standard and a lecture note look different at a glance
+export function tierColor(tier: string | null): string {
+  switch (tier) {
+    case 'T1': return 'success'
+    case 'T2': return 'suggestion'
+    case 'T3': return 'permission'
+    case 'T4': return 'warning'
+    default: return 'subtle'
+  }
+}
+
+// library_stats' last_eval -> the search-quality tile's numbers
+export function evalFrom(raw: unknown): EvalSummary | null {
+  if (!raw || typeof raw !== 'object') return null
+  const e = raw as Record<string, unknown>
+  const nd = e['ndcg@10']
+  return {
+    ndcg10: typeof nd === 'number' && isFinite(nd) ? nd : null,
+    questions: typeof e.n === 'number' ? e.n : 0,
+    date: typeof e.ts === 'string' ? e.ts.slice(0, 10) : null,
+    reranker: typeof e.reranker === 'string' && e.reranker ? e.reranker : null,
+    minQuestions: typeof e.min_questions === 'number' ? e.min_questions : 30,
+  }
+}
+
+// the tile's line and how much to trust it: no score is shown as a number until the golden set is big enough
+export function qualityLine(e: EvalSummary | null): { text: string; level: 'ok' | 'weak' | 'none' } {
+  if (!e || e.ndcg10 === null) {
+    return { text: 'Search quality: not measured yet. Build a golden set (questions with known right answers) and run erla eval.', level: 'none' }
+  }
+  const tail = [`${e.questions} question${e.questions === 1 ? '' : 's'}`, e.date, e.reranker].filter(Boolean).join(' · ')
+  if (e.questions < e.minQuestions) {
+    return { text: `Search quality: nDCG@10 ${e.ndcg10.toFixed(2)} (${tail}). Too few questions to rely on: needs ${e.minQuestions}+.`, level: 'weak' }
+  }
+  return { text: `Search quality: nDCG@10 ${e.ndcg10.toFixed(2)} (${tail})`, level: 'ok' }
 }
