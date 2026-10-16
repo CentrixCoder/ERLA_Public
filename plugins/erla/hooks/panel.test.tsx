@@ -70,11 +70,22 @@ test('helpers: stats, sources, file lists, references, preferences', () => {
 // a fake engine with ERLA behind it; records what the panel and Claude's tool calls did
 function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
   mock.clock(on)
-  const rec = { searchText: '{}', lastEval: null as unknown, mcp: [] as string[], searches: [] as Record<string, unknown>[], prompts: [] as string[], store: {} as Record<string, unknown>, refuse: '', reached: [] as string[], gpuReady: false }
+  const rec = { searchText: '{}', lastEval: null as unknown, mcp: [] as string[], searches: [] as Record<string, unknown>[], prompts: [] as string[], store: {} as Record<string, unknown>, refuse: '', reached: [] as string[], gpuReady: false,
+    // the install stub: the server offers only erla_setup_status, as after a plugin update
+    stub: null as string | null }
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:erla:erla' } }))
+  on('fs.read', ($, e) => {
+    if (String(e.path).replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json')) return { value: '{"name": "erla", "version": "0.4.1"}' }
+    throw new Error(`ENOENT: ${String(e.path)}`)
+  })
   on('mcp.call', ($, e) => {
     if (e.tool !== 'index_status') rec.mcp.push(`${e.tool} ${JSON.stringify(e.args ?? {})}`)
+    if (rec.stub !== null) {
+      if (e.tool === 'erla_setup_status') return { value: { content: [{ type: 'text', text: rec.stub }], isError: false } }
+      // the rejection the panel showed on 2026-10-16 (engine 2.1.299), word for word
+      return { deny: `$.mcp.call: no connected MCP tool "${e.tool}" on a server named "plugin:erla:erla"` }
+    }
     if (e.tool === rec.refuse) return { deny: 'The server-side auto mode classifier gave no verdict' }
     const out: Record<string, unknown> = {
       library_stats: { text: STATS, last_eval: rec.lastEval },
@@ -152,6 +163,35 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     await ui.press({ key: 'reindex' })
     expect(rec.mcp).toContain('index_start {}')
+    await ui.unmount()
+  })
+}
+
+// 2026-10-16: after the update to 0.4.1 the server was still the install stub; the panel showed no
+// version and one raw "no connected MCP tool" error per button. It must say what to do instead.
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`${surface}: /erla against the install stub shows Setup and the plugin version, then recovers`, async ($, on) => {
+    const rec = fake(on)
+    rec.stub = 'Install finished: ERLA 0.4.1. To load the library tools, quit and reopen the Claude app.'
+    await $.session.start({ cwd: '/', surface, isInteractive: true })
+    await $.command.run({ command: 'erla', args: '' } as never)
+    const ui = await $.ui.mount({ plugin: 'erla', surface, component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+
+    expect(await ui.find({ type: 'Text', text: /^v0\.4\.1$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Setup: reconnect ERLA$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /If they have not, quit and reopen the Claude app/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /no connected MCP tool/ })).toBe(undefined)
+
+    await ui.press({ key: 'reindex' })
+    expect(await ui.find({ type: 'Text', text: /ERLA is not ready yet: see Setup/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /no connected MCP tool/ })).toBe(undefined)
+
+    // the person reconnects: Check again loads the real server's status and drops the Setup card
+    rec.stub = null
+    await ui.press({ key: 'setup-check' })
+    expect(await ui.find({ type: 'Text', text: /^Setup:/ })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /^v0\.2\.9$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ CURRENT $/ })).toBeDefined()
     await ui.unmount()
   })
 }

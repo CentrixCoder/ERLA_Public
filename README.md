@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.1-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.4.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,16 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.4.2
+
+In short: right after an install or update, the control panel tells you what to do instead of showing errors.
+- **No reconnect after an install.** When ERLA's runtime finishes installing, its library tools appear in
+  the same session by themselves.
+- **Setup card.** While the runtime installs, the control panel shows a "Setup" card with the install
+  progress and a **Check again** button, and the title shows the plugin's version. Before, every button
+  showed a "no connected MCP tool" error. After an update, quit and reopen the Claude app to restart a
+  server that was already running.
+
 ### 0.4.1
 
 In short: the control panel now shows how well each source matches your question.
@@ -51,10 +61,6 @@ its source before it reaches you.
   equations and tables come first.
 - **Search quality score.** `erla eval` reports nDCG@10, a standard ranking score, and can compare
   re-rankers on your own golden queries.
-
-### 0.3.9
-
-- Maintenance release: no changes in the free edition.
 
 <!-- release-notes:end -->
 

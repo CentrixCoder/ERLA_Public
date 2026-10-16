@@ -90,8 +90,9 @@ def _log(msg: str, echo: bool) -> None:
         print(line, flush=True)
 
 
-RECONNECT = ("Reconnect the erla server to load it: in Claude Desktop / claude.ai turn the ERLA plugin "
-             "off and on (or restart Claude Desktop); in Claude Code use /mcp.")
+RECONNECT = ("A session that started during the install switches to it by itself; if ERLA's library tools "
+             "do not appear, quit and reopen the Claude app (/reload-plugins and /mcp Reconnect do not "
+             "restart a running server).")
 LOCK_STALE_S = 3600          # an install lock older than this is treated as abandoned
 
 
@@ -171,23 +172,35 @@ def start_background_install() -> None:
                          creationflags=flags, start_new_session=(sys.platform != "win32"), close_fds=True)
 
 
+def server_env() -> dict[str, str]:
+    env = dict(os.environ)
+    roots = env.get("ERLA_LIBRARY_ROOTS", "")
+    if "${" in roots:                          # setting not filled in yet
+        env.pop("ERLA_LIBRARY_ROOTS", None)
+    env.pop("PYTHONPATH", None)
+    return env
+
+
+# -P: never import from the current directory; only the installed package is used.
+def server_cmd() -> list[str]:
+    return [str(VPY), "-P", "-m", "erla.mcp_server"]
+
+
 def main(argv: list[str]) -> int:
     if "--install" in argv:
         return install(echo="--quiet" not in argv)
+    DATA.mkdir(parents=True, exist_ok=True)
     if installed_ok() and not install_running():
-        env = dict(os.environ)
-        roots = env.get("ERLA_LIBRARY_ROOTS", "")
-        if "${" in roots:                      # setting not filled in yet
-            env.pop("ERLA_LIBRARY_ROOTS", None)
-        env.pop("PYTHONPATH", None)
-        # -P: never import from the current directory; only the installed package is used.
-        DATA.mkdir(parents=True, exist_ok=True)
-        return subprocess.call([str(VPY), "-P", "-m", "erla.mcp_server"], env=env, cwd=str(DATA))
+        return subprocess.call(server_cmd(), env=server_env(), cwd=str(DATA))
     if sys.version_info >= MIN_PY and not install_running():
         start_background_install()
+    # the stub hands over to the real server by itself once the install finishes (no reconnect)
     stub = PLUGIN_ROOT / "scripts" / "stub_server.py"
+    mcp_mode = SERVER_SRC / "erla" / "core" / "protocols" / "MCP_MODE.md"
     return subprocess.call([sys.executable, str(stub), str(LOG), wanted_version(),
-                            f"{sys.version_info[0]}.{sys.version_info[1]}"])
+                            f"{sys.version_info[0]}.{sys.version_info[1]}",
+                            "--handoff", str(STAMP), str(LOCK), str(mcp_mode), "--", *server_cmd()],
+                           env=server_env(), cwd=str(DATA))
 
 
 if __name__ == "__main__":

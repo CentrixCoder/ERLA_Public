@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { FileHit, LibraryView, PanelSettings, PanelView, Progress, Source } from '../types'
-import { explain, splitPaths } from './library'
+import { explain, MISSING_TOOL, RELOAD_HINT, setupError, setupFrom, splitPaths } from './library'
 import type { AddResult, RemoveResult, SiteInfo, StatusResult } from './library'
 import {
   askPrompt, CHART_HITS, DEFAULT_SETTINGS, evalFrom, filesFrom, isReranker, openPrompt, parseStats, preferencesSection, qualityLine,
@@ -392,14 +392,45 @@ const EMPTY: LibraryView = {
   needsIndex: false,
 }
 
+const textOf = (res: { content: { type: string; text?: unknown }[] }): string | null => {
+  const block = res.content.find(c => c.type === 'text')
+  return block && 'text' in block ? String(block.text) : null
+}
+
 async function call<T>($: EngineInterface, tool: string, args: Record<string, unknown> = {}): Promise<T> {
   const own = await $.mcp.connect('erla')
   if (!own.isConnected) throw new Error(`the erla server is not connected (${own.message})`)
-  const res = await $.mcp.call(own.server, tool, args)
-  const block = res.content.find(c => c.type === 'text')
-  const text = block && 'text' in block ? String(block.text) : '{}'
+  let res: Awaited<ReturnType<EngineInterface['mcp']['call']>>
+  try {
+    res = await $.mcp.call(own.server, tool, args)
+  } catch (err) {
+    if (!MISSING_TOOL.test(String(err instanceof Error ? err.message : err))) throw err
+    // the install stub, not a broken panel: show its report instead of one raw error per button
+    let report: string | null = null
+    try {
+      report = textOf(await $.mcp.call(own.server, 'erla_setup_status', {}))
+    } catch {
+      // not the stub either: setupFrom(null) says the server offers no ERLA tools
+    }
+    await setPanel($, { setup: setupFrom(report) })
+    throw setupError()
+  }
+  const text = textOf(res) ?? '{}'
   if (res.isError) throw new Error(text)
   return JSON.parse(text) as T
+}
+
+// this plugin copy's version, from its own manifest: the header shows it when the server cannot
+async function readPluginVersion($: EngineInterface): Promise<string | null> {
+  for (const path of [`${$.plugin.root}/.claude-plugin/plugin.json`, `${$.plugin.root}/plugin.json`]) {
+    try {
+      const v = (JSON.parse(await $.fs.read(path)) as { version?: unknown }).version
+      if (typeof v === 'string' && /^\d+\.\d+\.\d+/.test(v)) return v
+    } catch {
+      // try the next place; a missing manifest only hides the version
+    }
+  }
+  return null
 }
 
 const set = ($: EngineInterface, change: Partial<LibraryView>) =>
@@ -409,7 +440,7 @@ async function refresh($: EngineInterface): Promise<void> {
   try {
     const info = await call<SiteInfo>($, 'site_info')
     const probe = info.library_probe
-    await setPanel($, { configUnits: info.unit_system ?? null, version: info.erla_version ?? null })
+    await setPanel($, { configUnits: info.unit_system ?? null, version: info.erla_version ?? null, setup: null })
     await set($, {
       roots: info.library_roots ?? [],
       filesOnDisk: probe?.files_on_disk ?? null,
@@ -525,6 +556,8 @@ const PANEL_EMPTY: PanelView = {
   vectors: null,
   configUnits: null,
   version: null,
+  pluginVersion: null,
+  setup: null,
   lastEval: null,
   query: '',
   files: null,
@@ -679,7 +712,7 @@ function exportReferences($: EngineInterface): Promise<void> {
 
 function registerPanel(on: Parameters<Register>[0]): void {
   on('command.run', { command: 'erla' }, async $ => {
-    await setPanel($, { busy: 'Reading ERLA status…', message: null })
+    await setPanel($, { busy: 'Reading ERLA status…', message: null, pluginVersion: await readPluginVersion($) })
     const opened = await $.ui.open({ id: PANEL_PANE, title: PANEL_TITLE, focus: true, closeOnEscape: true, rows: 36 })
     void refreshStatus($).finally(() => setPanel($, { busy: null }))
     return {
@@ -720,9 +753,23 @@ function registerPanel(on: Parameters<Register>[0]): void {
       <Box flexDirection="column" paddingX={1}>
         <Box gap={1} marginBottom={1}>
           <Text bold color="claude">ERLA</Text>
-          {v.version ? <Text color="claude">{`v${v.version}`}</Text> : null}
+          {v.version ?? v.pluginVersion ? <Text color="claude">{`v${v.version ?? v.pluginVersion}`}</Text> : null}
           <Text color="subtle">Engineering Research Library Agent</Text>
         </Box>
+
+        {v.setup
+          ? card('setup', v.setup.done ? 'Setup: reconnect ERLA' : 'Setup: ERLA is installing', 'warning',
+            <Text key="setup-head" color="warning">
+              {v.setup.done
+                ? `ERLA ${v.pluginVersion ?? ''} is installed, but this session still talks to the installer. ${RELOAD_HINT}`.replace(/\s+/g, ' ')
+                : `The buttons below work once ERLA's runtime is installed. ${RELOAD_HINT}`}
+            </Text>,
+            <Text key="setup-report" color="subtle">{v.setup.text}</Text>,
+            <Box key="setup-actions" gap={1} marginTop={1}>
+              <Button key="setup-check" variant="primary" onPress={() => void panelAct($, 'Reading ERLA status…', () => refreshStatus($))}>Check again</Button>
+            </Box>,
+          )
+          : null}
 
         {card('status', 'Status', ACCENT.status,
           <Box key="badges" gap={2} flexWrap="wrap">

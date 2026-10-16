@@ -188,9 +188,9 @@ def _runtime_mismatch() -> dict | None:
         return None
     return {"running": __version__, "installed": on_disk,
             "next_step": f"tell the user: ERLA {on_disk} is installed but this server is still running "
-                         f"{__version__}. Restart it: in Claude Desktop / claude.ai turn the ERLA plugin "
-                         "off and on (or restart Claude Desktop); in Claude Code use /mcp. Until then the "
-                         f"tools behave as {__version__}."}
+                         f"{__version__}. Restart it: quit and reopen the Claude app (in a terminal, restart "
+                         "`claude`); /reload-plugins and /mcp Reconnect do not restart a running server. "
+                         f"Until then the tools behave as {__version__}."}
 
 
 # -------------------------------------------------------------- tool bodies

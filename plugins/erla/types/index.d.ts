@@ -99,6 +99,11 @@ export type PanelView = {
   configUnits: string | null
   // the running ERLA server's version (site_info erla_version), shown in the header
   version: string | null
+  // this plugin copy's version (its plugin.json), shown when the server cannot say
+  pluginVersion: string | null
+  // set while the erla server is the install stub (only erla_setup_status): its report,
+  // and whether the install has finished and only a reconnect is missing
+  setup: { text: string; done: boolean } | null
   // library_stats last_eval, parsed; null when no eval has been recorded
   lastEval: EvalSummary | null
   query: string
