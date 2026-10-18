@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import {
-  askPrompt, checkPolicyLines, dashboardLink, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
+  artifactsFrom, askPrompt, checkPolicyLines, dashboardLink, onlyDashboard, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
   rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
@@ -74,7 +74,9 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
     // the install stub: the server offers only erla_setup_status, as after a plugin update
     stub: null as string | null,
     // the erla server is not running (the app reports it disconnected)
-    down: false }
+    down: false,
+    // the Artifact tool's listing text; 'deny' refuses the call, 'missing' rejects it (no such tool)
+    artifacts: '' as string, artifactCalls: [] as Record<string, unknown>[] }
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: rec.down ? { isConnected: false, server: 'plugin:erla:erla', message: 'not running' } : { isConnected: true, server: 'plugin:erla:erla' } }))
   on('fs.read', ($, e) => {
@@ -111,6 +113,12 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
   // Claude's own ERLA calls reach these, below the plugin's tool.call hook
   on('tool.call', ($, e) => {
     rec.reached.push(e.tool)
+    if (e.tool === 'Artifact') {
+      rec.artifactCalls.push({ ...e })
+      if (rec.artifacts === 'missing') throw new Error('no tool named "Artifact"')
+      if (rec.artifacts === 'deny') return { deny: 'Permission to use Artifact has been denied.' }
+      return { result: rec.artifacts, text: rec.artifacts } as never
+    }
     if (/library_search$/.test(e.tool)) rec.searches.push({ ...e })
     const text = /library_show$/.test(e.tool) ? (e as { doc_id?: number }).doc_id === 99 ? SHOW_ITAR : SHOW
       : /library_search$/.test(e.tool) ? rec.searchText : '{}'
@@ -527,6 +535,106 @@ for (const state of ['server', 'stub', 'disconnected'] as const) {
     expect(await ui.find({ type: 'Link' })).toBe(undefined)
     expect(await ui.find({ key: 'dash-input' })).toBeDefined()
     expect(rec.mcp.length).toBe(before)                                                   // no ERLA tool was called
+    await ui.unmount()
+  })
+}
+
+// the Artifact tool's listing as it printed on 2026-10-17 (engine 2.1.299), titles shortened
+const LISTING = [
+  '4 artifacts, published by you or shared with you (your own first, ...):',
+  `- (mine) ERLA KPI Dashboard — ${DASH} — updated 2026-10-17`,
+  '- (mine) Lug Restraint Free Bodies — https://claude.ai/artifact/XXM6h1P6ToDGJF3F76c6Ws — updated 2026-09-02',
+  '- (mine) ERLA operations — https://claude.ai/artifact/BWFTPwHtL8vdqSgEGieqw2 — updated 2026-10-11',
+  '(Artifacts shared from another organization are not listed here yet; ask the user for the link.)',
+].join('\n')
+
+test('artifact listing: claude.ai links only, dashboards first, one dashboard picked by itself', () => {
+  const all = artifactsFrom(LISTING)
+  expect(all).toEqual([
+    { title: 'ERLA KPI Dashboard', url: DASH },
+    { title: 'Lug Restraint Free Bodies', url: 'https://claude.ai/artifact/XXM6h1P6ToDGJF3F76c6Ws' },
+    { title: 'ERLA operations', url: 'https://claude.ai/artifact/BWFTPwHtL8vdqSgEGieqw2' },
+  ])
+  expect(onlyDashboard(all)).toEqual({ title: 'ERLA KPI Dashboard', url: DASH })
+  // a shared title is data: a look-alike host, a javascript: link or a title alone never becomes a choice
+  const hostile = [
+    '- (shared) KPI dashboard — https://claude.ai.evil.example/artifact/abc — updated 2026-10-01',
+    '- (shared) Dashboard — javascript:alert(1)',
+    '- (shared) Ops dashboard — http://claude.ai/artifact/plainhttp',
+    '- (shared) Team KPI Dashboard — https://claude.ai/code/artifact/0b7e-41aa — updated 2026-10-02',
+  ].join('\n')
+  expect(artifactsFrom(hostile)).toEqual([{ title: 'Team KPI Dashboard', url: 'https://claude.ai/code/artifact/0b7e-41aa' }])
+  // two dashboards: the person picks; none named like one: the person picks
+  const two = artifactsFrom(`${LISTING}\n- (mine) Fleet dashboard — https://claude.ai/artifact/Fleet123 — updated 2026-10-12`)
+  expect(two.slice(0, 2).map(c => c.title)).toEqual(['ERLA KPI Dashboard', 'Fleet dashboard'])
+  expect(onlyDashboard(two)).toBe(null)
+  expect(onlyDashboard(artifactsFrom('- (mine) ERLA operations — https://claude.ai/artifact/BWFTPwHtL8vdqSgEGieqw2'))).toBe(null)
+  expect(artifactsFrom(null)).toEqual([])
+})
+
+// Find my dashboard calls the Artifact tool, not ERLA: it works with the install stub and a disconnected server too
+for (const state of ['server', 'stub', 'disconnected'] as const) {
+  test(`Find my dashboard (${state}): one dashboard among the artifacts is saved without copying a link`, async ($, on) => {
+    const rec = fake(on)
+    if (state === 'stub') rec.stub = 'Installing ERLA 0.5.3: this takes a few minutes.'
+    rec.down = state === 'disconnected'
+    rec.artifacts = LISTING
+    rec.store.settings = { dashboardShown: true }
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'erla', args: '' } as never)
+    const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+    const before = rec.mcp.length
+
+    expect(await ui.find({ type: 'Link' })).toBe(undefined)
+    await ui.press({ key: 'dash-find' })
+    expect(rec.artifactCalls).toEqual([expect.objectContaining({ tool: 'Artifact', action: 'list' })])
+    expect(rec.store.settings).toMatchObject({ dashboardUrl: DASH, dashboardShown: true })
+    expect((await ui.find({ type: 'Link' }))?.props).toMatchObject({ href: DASH })
+    expect(await ui.find({ type: 'Text', text: /Found "ERLA KPI Dashboard" and saved its link/ })).toBeDefined()
+    expect(await ui.find({ key: 'dash-find' })).toBe(undefined)
+    expect(rec.mcp.length).toBe(before)
+    await ui.unmount()
+  })
+}
+
+test('Find my dashboard: with two dashboards the card lists them and a press saves the one chosen', async ($, on) => {
+  const rec = fake(on)
+  const FLEET = 'https://claude.ai/artifact/Fleet123'
+  rec.artifacts = `${LISTING}\n- (mine) Fleet dashboard — ${FLEET} — updated 2026-10-12`
+  rec.store.settings = { dashboardShown: true }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await ui.press({ key: 'dash-find' })
+  expect((rec.store.settings as { dashboardUrl?: unknown }).dashboardUrl ?? null).toBe(null)
+  expect(await ui.find({ type: 'Text', text: /Pick your dashboard/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '→ Fleet dashboard' })).toBeDefined()
+  await ui.press({ key: 'dash-pick-1' })
+  expect(rec.store.settings).toMatchObject({ dashboardUrl: FLEET })
+  expect((await ui.find({ type: 'Link' }))?.props).toMatchObject({ href: FLEET })
+  expect(await ui.find({ key: 'dash-pick-0' })).toBe(undefined)
+  // Change link brings Find my dashboard back, without the old list
+  await ui.press({ key: 'dash-change' })
+  expect(await ui.find({ key: 'dash-find' })).toBeDefined()
+  expect(await ui.find({ key: 'dash-pick-0' })).toBe(undefined)
+  await ui.unmount()
+})
+
+for (const failure of ['deny', 'missing', 'empty'] as const) {
+  test(`Find my dashboard (${failure}): says what happened and keeps the paste field`, async ($, on) => {
+    const rec = fake(on)
+    rec.artifacts = failure === 'empty' ? '0 artifacts, published by you or shared with you.' : failure
+    rec.store.settings = { dashboardShown: true }
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'erla', args: '' } as never)
+    const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+    await ui.press({ key: 'dash-find' })
+    const why = { deny: /Could not list your claude\.ai artifacts: Permission/, missing: /cannot be listed in this session/, empty: /No claude\.ai artifacts found/ }[failure]
+    expect(await ui.find({ type: 'Text', text: why })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /paste the dashboard's https:\/\/ link/i })).toBeDefined()
+    expect((rec.store.settings as { dashboardUrl?: unknown }).dashboardUrl ?? null).toBe(null)
+    expect(await ui.find({ key: 'dash-input' })).toBeDefined()
+    expect(await ui.find({ type: 'Link' })).toBe(undefined)
     await ui.unmount()
   })
 }

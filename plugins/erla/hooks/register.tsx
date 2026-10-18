@@ -5,7 +5,7 @@ import type { FileHit, LibraryView, PanelSettings, PanelView, Progress, Source }
 import { explain, MISSING_TOOL, RELOAD_HINT, setupError, setupFrom, splitPaths } from './library'
 import type { AddResult, RemoveResult, SiteInfo, StatusResult } from './library'
 import {
-  askPrompt, CHART_HITS, dashboardLink, DEFAULT_SETTINGS, evalFrom, filesFrom, isReranker, openPrompt, parseStats, preferencesSection, qualityLine,
+  artifactsFrom, askPrompt, CHART_HITS, DASHBOARD_CHOICES, dashboardLink, DEFAULT_SETTINGS, evalFrom, onlyDashboard, filesFrom, isReranker, openPrompt, parseStats, preferencesSection, qualityLine,
   checkPolicyLines, readSettings, referencesMarkdown, RERANKER_OPTIONS, rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
@@ -564,6 +564,7 @@ const PANEL_EMPTY: PanelView = {
   lastEval: null,
   query: '',
   files: null,
+  dashboardChoices: null,
   busy: null,
   message: null,
 }
@@ -688,7 +689,44 @@ async function saveDashboard($: EngineInterface, value: string): Promise<void> {
     return
   }
   await changeSettings($, { dashboardUrl: url })
+  await setPanel($, { dashboardChoices: null })
   await say($, 'Dashboard link saved: Open KPI dashboard opens it in your browser.')
+}
+
+// Find my dashboard: the person's claude.ai artifacts through the Artifact tool (a read-only
+// listing), so nobody has to copy an address; one artifact named like a dashboard is saved at
+// once, otherwise the card offers the list to pick from. Pasting stays the fallback.
+const NO_LISTING = 'Paste the dashboard\'s https:// link below instead (open the dashboard in your browser and copy its address).'
+
+function findDashboard($: EngineInterface): Promise<void> {
+  return panelAct($, 'Looking up your claude.ai artifacts…', async () => {
+    let text: string | null
+    try {
+      const res = await $.tool.call({ tool: 'Artifact', action: 'list', scope: 'all', limit: 50 } as never)
+      if (res.deny !== undefined) {
+        await say($, `Could not list your claude.ai artifacts: ${res.deny} ${NO_LISTING}`, true)
+        return
+      }
+      text = typeof res.text === 'string' ? res.text : resultText(res.result)
+    } catch {
+      await say($, `Your claude.ai artifacts cannot be listed in this session (no Artifact tool here). ${NO_LISTING}`, true)
+      return
+    }
+    const choices = artifactsFrom(text)
+    if (!choices.length) {
+      await say($, `No claude.ai artifacts found for your account. Ask Claude to build your KPI dashboard, or ${NO_LISTING.charAt(0).toLowerCase()}${NO_LISTING.slice(1)}`, true)
+      return
+    }
+    const only = onlyDashboard(choices)
+    if (only) {
+      await changeSettings($, { dashboardUrl: only.url })
+      await setPanel($, { dashboardChoices: null })
+      await say($, `Found "${only.title}" and saved its link: Open KPI dashboard opens it in your browser.`)
+      return
+    }
+    await setPanel($, { dashboardChoices: choices.slice(0, DASHBOARD_CHOICES) })
+    await say($, 'Pick your dashboard from your artifacts below.')
+  })
 }
 
 async function copyDashboard($: EngineInterface, url: string, surface: Parameters<EngineInterface['ui']['copy']>[0]['surface']): Promise<void> {
@@ -813,21 +851,36 @@ function registerPanel(on: Parameters<Register>[0]): void {
           ? card('dashboard', 'KPI dashboard', ACCENT.dashboard,
             s.dashboardUrl
               ? <Text key="dash-open" bold><Link href={s.dashboardUrl}>Open KPI dashboard ↗</Link></Text>
-              : <Text key="dash-none" color="subtle">Paste the https link to your KPI dashboard (for example a claude.ai artifact). It is saved with your panel settings and opens in your browser.</Text>,
+              : <Text key="dash-none" color="subtle">Press Find my dashboard: ERLA looks through your claude.ai artifacts and saves your dashboard's link. It is kept with your panel settings and opens in your browser.</Text>,
             s.dashboardUrl ? <Text key="dash-url" color="subtle" wrap="truncate-middle">{s.dashboardUrl}</Text> : null,
+            !s.dashboardUrl && v.dashboardChoices
+              ? (
+                <Box key="dash-choices" flexDirection="column" marginTop={1}>
+                  <Text key="dash-choices-head" color="subtle">Your artifacts (press one to use it):</Text>
+                  {v.dashboardChoices.map((c, i) => (
+                    <Button key={`dash-pick-${i}`} plain onPress={() => void saveDashboard($, c.url)}>
+                      <Text color="claude">{`→ ${c.title}`}</Text>
+                    </Button>
+                  ))}
+                </Box>
+              )
+              : null,
             s.dashboardUrl
               ? null
               : (
-                <Box key="dash-row" width="100%" flexGrow={1}>
+                <Box key="dash-row" width="100%" flexGrow={1} marginTop={1}>
                   <Input
                     key="dash-input"
-                    placeholder="https://claude.ai/artifact/…"
+                    placeholder="or paste a link: https://claude.ai/artifact/…"
                     submitLabel="save"
                     onSubmit={value => void saveDashboard($, value)}
                   />
                 </Box>
               ),
             <Box key="dash-actions" gap={1} marginTop={1}>
+              {s.dashboardUrl
+                ? null
+                : <Button key="dash-find" variant="primary" onPress={() => void findDashboard($)}>Find my dashboard</Button>}
               {s.dashboardUrl
                 ? <Button key="dash-copy" variant="secondary" onPress={press => void copyDashboard($, s.dashboardUrl ?? '', press.surface)}>Copy link</Button>
                 : null}

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.5.3-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,13 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.5.3
+
+In short: the control panel finds your KPI dashboard for you.
+- **Find my dashboard.** On the KPI dashboard card (turn it on in the panel's Settings), press
+  **Find my dashboard**. ERLA lists your claude.ai artifacts and saves the dashboard's link, or lets you
+  pick it from the list. Pasting the address still works.
+
 ### 0.5.2
 
 In short: ERLA's checker keeps up with new Claude models, and tells you when it has not been re-measured.
@@ -35,23 +42,6 @@ In short: ERLA never forces an answer.
   is missing. Such an answer cannot be logged or exported as a solution.
 - **New rule G3.7:** neither ERLA nor its checker ever produces, adjusts or chooses a value or conclusion
   to satisfy a request or to make two results agree.
-
-### 0.5.0
-
-In short: an independent checker now vets ERLA's computed and design answers before you see them.
-- **The Professor.** A second ERLA agent checks an answer on its own: it re-opens every source, works out
-  each value itself before it sees ERLA's, and runs sanity checks (units, magnitudes, method limits,
-  conservative assumptions). Its verdict - PASS, PASS WITH FINDINGS or FAIL - appears in a new
-  section G of the Result Packet. It is an AI check, not a certification and not a substitute for the
-  checker of record.
-- **Checked in code, not on trust.** The checker cannot see ERLA's numbers until it has recorded its
-  own; the comparison is computed by code; a verdict that contradicts it is refused. A packet that needs
-  a check cannot be logged or exported without one, or without a stated reason it could not run.
-- **You decide when it runs.** `erla check-policy auto|always|off` in a terminal (default `auto`:
-  answers with computed or design values). Only you can change it; the control panel's Settings card
-  shows the current choice. `/erla:check` checks any answer, or your own hand calculation, on request.
-- **Sharper value checks.** A table value is confirmed in its row and column, or reported as
-  unconfirmed; an honest "not found" answer is no longer logged as unverified.
 
 <!-- release-notes:end -->
 
@@ -196,6 +186,31 @@ How a tier is assigned:
 The tier is separate from the restricted-document flag (ITAR, EAR, CUI, proprietary). A T1 document
 can also be flagged local-only.
 <!-- public:end authority-tiers -->
+
+<!-- public:begin kpi-dashboard -->
+### Open your KPI dashboard from the control panel
+
+The control panel can keep a link to your own KPI dashboard (for example a claude.ai artifact) and open
+it in your browser. The card is off until you turn it on.
+
+1. Type `/erla` to open the control panel.
+2. In the **Settings** card, turn on **Show the KPI dashboard card**.
+3. In the new **KPI dashboard** card, press **Find my dashboard**. ERLA lists your claude.ai artifacts
+   and, when exactly one is named like a dashboard ("KPI" or "dashboard" in its title), saves its link
+   on its own. Otherwise the card lists your artifacts: press the one you want. You do this once: the
+   link is saved with your panel settings.
+4. Press **Open KPI dashboard ↗**. The dashboard opens in your browser.
+
+If the lookup can't run (for example, Claude asks permission to list your artifacts and you decline),
+paste the dashboard's `https://` address into the field on the card instead and press **save**. You get
+the address by opening the dashboard in your browser and copying it from the address bar. Only
+`https://` addresses are accepted.
+
+Next time, `/erla`, then **Open KPI dashboard ↗**. On the same card, **Copy link** copies the address,
+**Change link** lets you find or paste a new one, and **Hide** removes the card but keeps the link. No dashboard
+address ships with ERLA: each person's link is their own. Like the rest of the panel, the card shows only
+in a Claude Code session (desktop app **Code** tab or terminal), not in a claude.ai chat.
+<!-- public:end kpi-dashboard -->
 
 ## About this repository
 

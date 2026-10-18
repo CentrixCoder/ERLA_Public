@@ -95,6 +95,9 @@ export type EvalSummary = {
   minQuestions: number
 }
 
+// one of the person's claude.ai artifacts, offered by the KPI dashboard card's Find my dashboard
+export type DashboardChoice = { title: string; url: string }
+
 export type PanelView = {
   // library_stats, parsed
   indexState: string | null
@@ -115,6 +118,8 @@ export type PanelView = {
   lastEval: EvalSummary | null
   query: string
   files: FileHit[] | null
+  // Find my dashboard's artifacts to pick from, when it could not pick one by itself
+  dashboardChoices: DashboardChoice[] | null
   busy: string | null
   message: { text: string; isError: boolean } | null
 }

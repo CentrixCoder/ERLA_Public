@@ -1,7 +1,7 @@
 // Pure helpers for the /erla control panel in register.tsx (the engine follows $ only within
 // one file, so the panel's hooks live there).
 
-import type { EvalSummary, FileHit, LastSearch, PanelSettings, PanelView, RankedHit, Source } from '../types'
+import type { DashboardChoice, EvalSummary, FileHit, LastSearch, PanelSettings, PanelView, RankedHit, Source } from '../types'
 
 export const DEFAULT_SETTINGS: PanelSettings = {
   units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default', dashboardUrl: null, dashboardShown: false,
@@ -20,6 +20,34 @@ export function dashboardLink(raw: unknown): string | null {
     return null
   }
   return url.protocol === 'https:' && url.hostname ? url.href : null
+}
+
+const ARTIFACT_URL = /https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]+/
+const DASHBOARD_TITLE = /\b(kpi|dashboard)/i
+export const DASHBOARD_CHOICES = 8
+
+// the Artifact tool's listing ("- (mine) ERLA KPI Dashboard — https://claude.ai/artifact/… — updated …")
+// -> the person's artifacts, the ones named like a dashboard first. Titles are data, shown as labels
+// only; a link is kept only when it is a claude.ai artifact address.
+export function artifactsFrom(text: string | null): DashboardChoice[] {
+  const seen = new Set<string>()
+  const all: DashboardChoice[] = []
+  for (const line of (text ?? '').split(/\r?\n/)) {
+    const m = ARTIFACT_URL.exec(line)
+    const url = m ? dashboardLink(m[0]) : null
+    if (!m || !url || seen.has(url)) continue
+    seen.add(url)
+    const title = line.slice(0, m.index).replace(/^\s*[-*]\s*/, '').replace(/^\((?:mine|shared)\)\s*/i, '')
+      .replace(/\s*[—–-]\s*$/, '').trim()
+    all.push({ title: title || url, url })
+  }
+  return [...all.filter(c => DASHBOARD_TITLE.test(c.title)), ...all.filter(c => !DASHBOARD_TITLE.test(c.title))]
+}
+
+// the one artifact to save without asking: exactly one is named like a dashboard
+export function onlyDashboard(choices: readonly DashboardChoice[]): DashboardChoice | null {
+  const dash = choices.filter(c => DASHBOARD_TITLE.test(c.title))
+  return dash.length === 1 ? dash[0] : null
 }
 
 // the control panel's re-ranker choices; the GPU ones need PyTorch with CUDA (erla rerank.status)
