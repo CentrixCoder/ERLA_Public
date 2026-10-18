@@ -41,8 +41,9 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, safeio
-from .config import AGENT_ROOT, ConfigError, load_config, protocol_dir, validate_config
+from .config import AGENT_ROOT, ConfigError, check_policy, load_config, protocol_dir, validate_config
 from .edition import render
+from .disciplines import info as disciplines_info
 from .specialists import SPECIALISTS, installed
 
 PROTOCOL_FILES = ["guardrails.md", "rules_and_guidelines.md", "ERLA.md", "instructions.md",
@@ -77,6 +78,14 @@ def _now() -> str:
 
 def _cfg():
     return load_config()
+
+
+def _check_policy() -> str:
+    """The site's check policy for site_info; 'auto' (never 'off') when no site is configured yet."""
+    try:
+        return check_policy(load_config(validate=False))
+    except (ConfigError, OSError):
+        return "auto"
 
 
 def _con(cfg):
@@ -199,7 +208,10 @@ def t_site_info() -> dict:
     site = AGENT_ROOT
     info: dict[str, Any] = {"erla_version": __version__, "site": str(site), "protocols": str(protocol_dir()),
                             "startup_notes": STARTUP_NOTES,
-                            "specialists": {k: s["agent"] for k, s in installed().items()}}
+                            # kept for older protocol text: now the discipline skill, no worker agent (ADR-0002)
+                            "specialists": {k: f"erla:{s['skill']}" for k, s in installed().items()},
+                            "disciplines": disciplines_info(),       # discipline skills (ADR-0002)
+                            "check_policy": _check_policy()}         # when erla:professor vets a packet (user's)
     if not info["specialists"]:
         info["edition"] = ("core: no specialist agents installed; do discipline work as the lead agent and say "
                            "no specialist reviewed it")
@@ -615,9 +627,67 @@ def t_protocol_section(file: str, key: str) -> dict:
 
 def t_log_request(record: dict) -> dict:
     from .report import append_log
-    # a packet logged without a verify_packet id is marked, so evaluations can count unverified answers
-    rec = {"cmd": "agent", **record, "verified": bool(record.get("verification_id"))}
-    return {"logged_to": str(append_log(_cfg(), rec))}
+    # a packet logged without a verify_packet id is marked, so evaluations can count unverified answers.
+    # A packet that declares it reports no values (a not-found answer, L8) has nothing to verify: null,
+    # not false. Anything else without an id stays false (fail closed: a missing, non-integer or
+    # non-zero count, or a bool).
+    n = record.get("values_reported")
+    if record.get("verification_id"):
+        verified: bool | None = True
+    elif type(n) is int and n == 0:
+        verified = None
+    else:
+        verified = False
+    from . import checkgate
+    cfg = _cfg()
+    try:                     # the user's check policy (ADR-0002 Phase 3): no check, no log - fail closed
+        check = checkgate.gate(cfg, checkgate.needs_check_record(cfg, record), str(record.get("check_id") or ""),
+                               str(record.get("unchecked_reason") or ""))
+    except checkgate.CheckError as exc:
+        return {"error": str(exc), "check_policy": check_policy(cfg)}
+    rec = {"cmd": "agent", **record, "verified": verified, **check}   # check fields come from the record on disk
+    return {"logged_to": str(append_log(cfg, rec)), **check}
+
+
+def t_check_open(packet: dict) -> dict:
+    from . import checkgate
+    try:
+        return checkgate.open_check(_cfg(), packet)
+    except checkgate.CheckError as exc:
+        return {"error": str(exc)}
+
+
+def t_check_estimate(check_id: str, estimates: list[dict]) -> dict:
+    from . import checkgate
+    try:
+        return checkgate.estimate(_cfg(), check_id, estimates)
+    except checkgate.CheckError as exc:
+        return {"error": str(exc)}
+
+
+def t_check_reveal(check_id: str) -> dict:
+    from . import checkgate
+    try:
+        return checkgate.reveal(_cfg(), check_id)
+    except checkgate.CheckError as exc:
+        return {"error": str(exc)}
+
+
+def t_check_close(check_id: str, verdict: str, findings: list[dict] | None = None,
+                  checker: str = "erla:professor", notes: list[dict] | None = None) -> dict:
+    from . import checkgate
+    try:
+        return checkgate.close(_cfg(), check_id, verdict, findings, checker, notes)
+    except checkgate.CheckError as exc:
+        return {"error": str(exc)}
+
+
+def t_check_status(check_id: str) -> dict:
+    from . import checkgate
+    try:
+        return checkgate.status(_cfg(), check_id)
+    except checkgate.CheckError as exc:
+        return {"error": str(exc)}
 
 
 def t_record_feedback(doc_id: int, verdict: str, note: str = "") -> dict:
@@ -633,13 +703,19 @@ def t_record_lesson(specialist: str, kind: str, lesson: str, evidence: str = "",
     return record_lesson(_cfg(), specialist, kind, lesson, evidence, rule)
 
 
-def t_export_packet(name: str, markdown: str, csv_text: str = "") -> dict:
+def t_export_packet(name: str, markdown: str, csv_text: str = "", check_id: str = "",
+                    unchecked_reason: str = "") -> dict:
+    from . import checkgate
     cfg = _cfg()
+    try:                     # same policy gate as log_request (ADR-0002 Phase 3)
+        check = checkgate.gate(cfg, checkgate.needs_check_text(cfg, markdown), check_id, unchecked_reason)
+    except checkgate.CheckError as exc:
+        return {"error": str(exc), "check_policy": check_policy(cfg)}
     stem = SAFE_NAME.sub("_", name).strip("._")[:80] or "result_packet"
     written = [str(safeio.write_text(cfg, cfg.out_dir / f"{stem}.md", markdown))]
     if csv_text:
         written.append(str(safeio.write_text(cfg, cfg.out_dir / f"{stem}.csv", csv_text)))
-    return {"written": written}
+    return {"written": written, **check}
 
 
 def t_index_start(full: bool = False, confirm: bool = False, embed: bool = True, ocr: bool = False) -> dict:
@@ -822,10 +898,12 @@ def build_server():
         "value, units, quantity}] - a material property also gives its temper, direction, basis, thickness and form "
         "as reported (checked against the column the value is printed in); a value from a table names its row (quantity plus material, temper, form, direction, or row = the row's label) and is checked against that row; a converted value adds source_value + "
         "source_units (the conversion is recomputed); kind 'quote' checks text; kind 'computed' gives the calc_id and "
-        "calc_output a calculation tool returned (checked against that run; scale 2 for a total from a half length) "
+        "calc_output a calculation tool returned (checked against that run; scale 2 for a total from a half length, "
+        "any other factor with the equation it comes from) "
         "or, when no tool applies, not_covered with the reason (listed as COMPUTED, not checked); a computed value with "
-        "neither FAILS. Returns per-item PASS/FAIL/COMPUTED with evidence and OCR/flag warnings, and a "
-        "verification_id for log_request.", ro)
+        "neither FAILS. Returns per-item PASS/FAIL/UNCONFIRMED/COMPUTED with evidence and OCR/flag warnings, and a "
+        "verification_id for log_request. UNCONFIRMED: the number is on the page but no property record or table "
+        "row confirms the row or column claimed for it - not verified.", ro)
     for spec in spec_on.values():           # names and descriptions live in the specialist modules
         reg(calc_tool(spec["tool"]), spec["tool"], spec["description"], ro)
     reg(t_protocol_section, "protocol_section", "Read one part of a protocol file instead of the whole file: "
@@ -836,7 +914,30 @@ def build_server():
         "Returns SAFE or BLOCKED.", ro)
     reg(t_source_tier, "source_tier", "Authority tier (T1-T6) for a web URL.", ro)
     reg(t_log_request, "log_request", "Append the request summary to the retrieval log (rules R7.1). "
-        "record: {query, scope, sources, budget, flags, verification_id}.", wr)
+        "record: {query, scope, sources, budget, flags, verification_id, values_reported}. "
+        "values_reported = number of values the packet reports (0 for a not-found answer); a packet "
+        "without verification_id is logged as unverified unless values_reported is 0. When the user's check "
+        "policy requires an independent check (site_info.check_policy; instructions W9), add check_id (a "
+        "closed check) or unchecked_reason; otherwise the request is refused. Optional: discipline, "
+        "skills_loaded, calc_ids, design_value.", wr)
+    reg(t_check_open, "check_open", "Lead only (instructions W9): open an independent check of a draft "
+        "packet - {question, inputs, sources, method, discipline, quantities: [{name, value, units, calc_id, "
+        "source}], assumptions, conclusion}. Returns check_id and brief_part1 (no values) for the professor "
+        "agent.", wr)
+    reg(t_check_status, "check_status", "State of an independent check; once closed, its verdict, the "
+        "computed comparison and the findings (for Result Packet section G).", ro)
+    reg(t_check_estimate, "check_estimate", "Professor only: record your own estimate of every quantity "
+        "[{name, value, units, method}] or [{name, not_checked: reason}] before the lead's values are "
+        "revealed.", wr)
+    reg(t_check_reveal, "check_reveal", "Professor only: after check_estimate, reveal the lead's values, "
+        "assumptions and conclusion with the comparison computed by code (within 2 % agrees, 2-5 % explain, "
+        "over 5 % out of tolerance).", wr)
+    reg(t_check_close, "check_close", "Professor only: record the verdict (PASS, PASS WITH FINDINGS, FAIL) "
+        "and findings [{quantity, item, changes_answer, evidence, action}]; minor remarks that change nothing go "
+        "in notes [{quantity, note}]. Refused when it contradicts the comparison: PASS needs every quantity "
+        "checked and within tolerance and no findings; a 2-5 % difference needs a note or finding with the "
+        "reason; each quantity out of tolerance needs a finding; FAIL needs a finding that changes the "
+        "answer. checker: erla:professor or self-check.", wr)
     reg(t_record_feedback, "record_feedback", "Record user feedback on a source: verdict 'useful' or "
         "'not_useful' (rules R7.2).", wr)
     reg_if(SPECIALISTS, t_record_lesson, "record_lesson", "Lead agent only: record a specialist lesson - kind "
@@ -845,7 +946,8 @@ def build_server():
         "logs/lessons.jsonl and opens a review trigger; the skill file changes only through the protocol "
         "review after the user approves (rules section 9).", wr)
     reg(t_export_packet, "export_packet", "Write a Result Packet (markdown, optional CSV of values) to "
-        "the site out/ folder (rules section 8). Never writes elsewhere.", wr)
+        "the site out/ folder (rules section 8). Never writes elsewhere. When the user's check policy "
+        "requires an independent check, pass check_id (a closed check) or unchecked_reason.", wr)
     reg(t_index_start, "index_start", "Start the background refresh job: index, deferred OCR, PDF table "
         "backfill and embeddings (same chain as erla refresh, one at a time via logs/refresh.lock). The first "
         "index starts automatically once a library is configured; a full re-index requires confirm=true "

@@ -69,6 +69,7 @@ If all YES → go to Step 6. Otherwise → Step 5 for the gaps only.
 3. Check dimensional consistency of every equation and unit conversion.
 4. Apply confidence rating (rules §2), including the data-quality flag downgrades; perform unit conversions with `erla convert` and show the factor (R4.6).
 5. Flag supersessions.
+6. Independent check (W9) when the check policy requires it, or when the user asks (`/erla:check`); the verdict goes in Result Packet §G.
 
 ## Step 7 — Package
 
@@ -116,3 +117,14 @@ Run after every ERLA release, when Step 0.4 finds drift, or when the user asks.
 4. Cloud: with a marketplace install, if the user keeps a claude.ai account upload for web chats, it is replaced with the same release's `erla-plugin-<version>.zip` and the old upload removed; otherwise confirm no account copy remains. Re-sync the claude.ai Project reference copies (protocol files, `CLOUD_MODE.md`) from the repo.
 5. Leftovers: list stale runtimes, data folders and caches (S18); delete only the paths the user approves (G10.4).
 6. Record: set `Core protocol version` in `PROTOCOL_REVIEW.md` and append `{"type": "install_sync", ...}` (versions found, actions taken) to `logs/protocol_review_log.jsonl`.
+
+### W9. Independent check (Professor; skill S19)
+1. Decide: `site_info` → `check_policy` (`auto`: the packet reports a COMPUTED value, applies a discipline skill, or gives a design value, margin or allowable; `always`; `off`). A user request (`/erla:check`) runs it under any policy.
+2. Open the check: `check_open` with {question, inputs (locator or USER INPUT), sources, method (one line), discipline, quantities [{name, value, units, calc_id, source}], assumptions, conclusion}. It returns `check_id` and `brief_part1`, which holds none of your values.
+3. Send `check_id` and `brief_part1` to the `professor` agent (Agent tool, `erla:professor`). It re-opens the sources, records its own estimate of every quantity (`check_estimate`), then sees your values with the comparison computed by code (`check_reveal`), runs sanity checks and the S0 checklist, and records the verdict and findings (`check_close`); code refuses a verdict that contradicts the comparison.
+4. Read the result with `check_status`, and act on the verdict:
+   - FAIL: fix and open a new check, at most 2 rework rounds; otherwise report each unresolved finding in §G and §E.
+   - PASS WITH FINDINGS: address or report each finding.
+   - Findings ERLA cannot resolve, and design or certification decisions, go to the user (L13).
+5. Result Packet §G from `check_status` (verdict, comparison table, findings) with the `check_id`. Pass the `check_id` to `log_request` and `export_packet`. If no check could run, pass `unchecked_reason` instead: both tools refuse a packet the policy requires to be checked without one. Lessons the Professor proposes: record the ones ERLA accepts with `record_lesson`, where installed.
+6. No Agent tool (e.g. a chat without sub-agents): run steps 2–3 yourself with the same tools, close with `checker: "self-check"`, and label §G "self-check (no independent agent available)". Never omit §G when the policy requires it.

@@ -58,6 +58,10 @@ CONTEXT_RE = {
     "direction": re.compile(r"^(direction|grain direction|orientation)\b", re.I),
 }
 FILLABLE = {"material", "spec", "form", "temper"}      # merged header cells span to the right
+GROUP_FIELDS = ("material", "form", "temper")          # a merged value cell spans columns of one heading group
+# Constants that do not vary with thickness or basis within one material/form/temper: printed as merged
+# cells. Strengths and elongation do vary, and a blank in their rows is usually a '...' the text lost.
+SPANNING = {"E", "Ec", "G", "poisson", "density"}
 DIMENSIONLESS = {"poisson", "elongation", "Kt", "Kf"}
 BASIS = re.compile(r"^(A|B|S|typical|typ\.?)\s*([a-z])?$", re.I)
 LABEL_BASIS = re.compile(r"\(\s*([ABS])\s*-\s*basis\s*\)", re.I)        # 'L (S-basis)', 'Fsu, ksi (S-basis):'
@@ -272,14 +276,17 @@ def _usable(q: str, unit: str | None) -> bool:
     return bool(unit) or q in DIMENSIONLESS
 
 
-def rows_layout(grid: list[list[str]], caption: str, cq: dict | None, ocr: bool) -> list[PropertyRecord]:
+def rows_layout(grid: list[list[str]], caption: str, cq: dict | None, ocr: bool,
+                columns: dict[int, dict[str, str | None]] | None = None) -> list[PropertyRecord]:
     """Rows = properties (MMPDS style). Column 0 = labels, columns 1.. = product/condition columns.
 
     Header region (before the first property row): labelled context rows (Specification, Form,
     Temper, Thickness, Basis) set per-column conditions; unlabelled lines are continuations of the
     adjacent context row (a line directly above an empty context row belongs to it, otherwise to the
     row above). A single context value that does not span columns explicitly is applied to all
-    columns and flagged CONTEXT_FILLED; a value marked as spanning (aligned_grid) needs no flag."""
+    columns and flagged CONTEXT_FILLED; a value marked as spanning (aligned_grid) needs no flag.
+    ``columns``, when given, receives each data column's heading group (material, form, temper) as
+    read once the header is complete (``spanned_records``); it does not change the records."""
     ncol = max(len(r) for r in grid)
     grid = [r + [""] * (ncol - len(r)) for r in grid]
     spans = {(i, j) for i, r in enumerate(grid) for j, c in enumerate(r) if SPAN in c}
@@ -388,6 +395,9 @@ def rows_layout(grid: list[list[str]], caption: str, cq: dict | None, ocr: bool)
                             filled.add((f, j))
                             resolved.add((f, j))
                             del cols[j]
+                if columns is not None:          # an unresolved temper is its own group, never a wildcard
+                    columns.update({j: {f: (f"?{j}" if f == "temper" and j in unresolved else ctx[f].get(j))
+                                        for f in GROUP_FIELDS} for j in range(1, ncol)})
             cur = (q, unit, mult, lab)
             seen_prop = True
         elif cur and (DIRECTION.match(label) or QUALIFIER.match(label)):
@@ -491,6 +501,91 @@ def extract_from_text(text: str, chunk_quality: dict | None = None, ocr: bool = 
         if not recs:
             recs = cols_layout(grid, cap, chunk_quality, ocr)
         out += recs
+    return out
+
+
+def _fill_spans(grid: list[list[str]], columns: dict[int, dict[str, str | None]]) -> list[list[str]] | None:
+    """The grid with each merged value cell repeated over the blank cells it spans, or None if none.
+
+    A value printed once over several columns (E over every sheet column) reaches the text in one
+    column, the others blank. Only the constants in SPANNING span: extraction drops '...' cells, so a
+    blank in a strength or elongation row is no evidence (a real MMPDS page prints '...' in the B column
+    of a D6AC Fcy row that reaches the text blank). A cell spans the blank cells next to it with the same
+    heading group (material, form, temper), provided the group holds no other entry in that row. A
+    column whose heading was not read (CONDITION_AMBIGUOUS) is never spanned into. A blank cell two
+    entries could span keeps its blank unless both print the same number."""
+    def clean(c: str) -> str:
+        return re.sub(r"\s+", " ", c.replace(SPAN, " ")).strip()
+
+    headed = [f for f in GROUP_FIELDS if any(c.get(f) for c in columns.values())]
+
+    def group(j: int) -> tuple[str, ...] | None:
+        """The column's heading group; None when a heading the table prints was not read for it."""
+        k = columns.get(j, {})
+        return None if any(not k.get(f) for f in headed) else tuple(_same(str(k[f])) for f in headed)
+
+    def compatible(a: int, b: int) -> bool:
+        return group(a) is not None and group(a) == group(b)
+
+    ncol = max(len(r) for r in grid)
+    out = [[clean(c) for c in r] + [""] * (ncol - len(r)) for r in grid]
+    first = next((i for i, r in enumerate(out) if parse_label(r[0])[0]), None)
+    if first is None:
+        return None
+    changed = False
+    for r in out[first:]:
+        if parse_label(r[0])[0] not in SPANNING:
+            continue
+        entries = [j for j in range(1, ncol) if r[j]]
+        if not any(_number(r[j])[0] is not None for j in entries):
+            continue
+        claims: dict[int, set[int]] = {}           # blank column -> entries that could span it
+        for j in entries:
+            lo = hi = j
+            while lo - 1 >= 1 and compatible(lo - 1, j):
+                lo -= 1
+            while hi + 1 < ncol and compatible(hi + 1, j):
+                hi += 1
+            if any(k != j and r[k] for k in range(lo, hi + 1)):
+                continue                               # another entry in the same group: not a span
+            for k in range(lo, hi + 1):
+                if k != j:
+                    claims.setdefault(k, set()).add(j)
+        for k, srcs in claims.items():
+            vals = {_number(r[j])[0] for j in srcs}
+            if len(vals) == 1 and None not in vals:
+                r[k] = r[min(srcs, key=lambda j: (abs(j - k), j))]
+                changed = True
+    return out if changed else None
+
+
+def spanned_records(text: str, caption: str | None = None) -> list[PropertyRecord]:
+    """Records for the columns a merged value cell spans (0.4.3): E printed once over every sheet column
+    is stored for the column it reached in the text only. These records are not stored (the store keeps
+    the printed cell); verify_packet uses them so a spanning value counts for every column it spans.
+    Each carries a SPANNED flag."""
+    out: list[PropertyRecord] = []
+    for pre, grid in parse_markdown_tables(text):
+        if len(grid) < 2 or sum(1 for r in grid if r and parse_label(r[0])[0]) < 2:
+            continue
+        cols: dict[int, dict[str, str | None]] = {}
+        base = rows_layout(grid, caption or pre, None, False, columns=cols)
+        filled = _fill_spans(grid, cols) if cols else None
+        if filled is None:
+            continue
+
+        def key(r: PropertyRecord) -> tuple:
+            return tuple(r.get(f) for f in ("quantity", "value", "row_label", "col_label", "basis", "thickness"))
+
+        have: dict[tuple, int] = {}
+        for r in base:
+            have[key(r)] = have.get(key(r), 0) + 1
+        for r in rows_layout(filled, caption or pre, None, False):
+            if have.get(key(r)):
+                have[key(r)] -= 1
+                continue
+            r["flags"] = [*r["flags"], "SPANNED: printed once across several columns (a merged cell)"]
+            out.append(r)
     return out
 
 

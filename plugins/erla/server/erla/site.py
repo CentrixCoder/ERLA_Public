@@ -411,6 +411,36 @@ def set_web_allow_terms(site: Path, add: list[str] | None = None, remove: list[s
     return {"changed": True, "old": old, "allow_terms": new, "backup": str(backup)}
 
 
+def set_check_policy(site: Path, policy: str, reason: str = "user request") -> dict:
+    """Set ``check.policy`` (ADR-0002): when the Professor must vet a Result Packet - 'auto' (computed
+    values, discipline work, design values), 'always' or 'off'. A user decision (L13), so it is a CLI
+    command only - no MCP tool can change it. Backs up the config to out/ and opens a protocol-review
+    trigger, like ``set_web_allow_terms``."""
+    from .config import CHECK_POLICIES
+    if policy not in CHECK_POLICIES:
+        raise SiteError(f"check policy must be one of {', '.join(CHECK_POLICIES)}; got {policy!r}")
+    site = Path(site).expanduser().resolve()
+    cfg_path = site / "config" / "library_config.yaml"
+    if not cfg_path.is_file():
+        raise SiteError(f"site not initialised: {cfg_path}. Run erla init --browse first.")
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    check_raw = raw.get("check")
+    check: dict[str, Any] = check_raw if isinstance(check_raw, dict) else {}
+    old = check.get("policy")
+    if old == policy:
+        return {"changed": False, "policy": policy}
+    roots = [Path(str(r)) for r in raw.get("library_roots") or []]
+    backup = site / "out" / f"protocol_backup_{date.today().isoformat()}"
+    safeio.copyfile(safeio.Guard.for_site(site, roots), cfg_path, backup / f"library_config_{int(time.time())}.yaml")
+    check["policy"] = policy
+    raw["check"] = check
+    header = "".join(l + "\n" for l in cfg_path.read_text(encoding="utf-8").splitlines() if l.startswith("#"))
+    _write_yaml(safeio.Guard.for_site(site, roots), cfg_path, raw, header)
+    _log(site, {"type": "trigger_open", "trigger": "site_change", "detail": "check.policy changed",
+                "old": old, "new": policy, "reason": reason})
+    return {"changed": True, "old": old, "policy": policy, "backup": str(backup)}
+
+
 def _roots_of(site: Path) -> list[str]:
     raw = yaml.safe_load((site / "config" / "library_config.yaml").read_text(encoding="utf-8")) or {}
     return [str(r) for r in raw.get("library_roots") or []]

@@ -7,7 +7,7 @@ Resources, in precedence order (lower number wins on conflict; report conflicts)
 1. `erla://protocols/guardrails` — hard limits
 2. `erla://protocols/rules_and_guidelines` — rules, tiers, confidence, Result Packet format (§6), protocol maintenance (§9)
 3. `erla://protocols/ERLA` — identity, user context, definition of done
-4. `erla://protocols/instructions` — runtime workflow (Steps 0–8, W1–W6)
+4. `erla://protocols/instructions` — runtime workflow (Steps 0–8, W1–W9)
 5. `erla://protocols/skills` — procedures
 Site facts: `erla://site/notes` and `site_info`. Library and site paths are set per computer and come only from `site_info` / site notes; the protocol files contain no machine paths. Where the protocols name a CLI command, use the MCP tool in the table below.
 
@@ -26,6 +26,7 @@ Site facts: `erla://site/notes` and `site_info`. Library and site paths are set 
 | `erla memory list` / `erla memory forget <id>` | no MCP tool - the user's CLI only; `verify_packet` adds to the memory by itself (`remembered`) |
 | one part of a protocol file (progressive reading) | `protocol_section`; index resources `erla://protocols/<file>/index` |
 | `erla tier <url>` | `source_tier` |
+| independent check (W9, no CLI) | `check_open`, `check_status` (lead); `check_estimate`, `check_reveal`, `check_close` (Professor) |
 | `erla log` / `erla feedback` | `log_request` / `record_feedback` |
 | `erla index` + `erla embed` / `erla refresh` | `index_start` (+ `index_status`) runs the same chain as `erla refresh` (index, deferred OCR, PDF table backfill within `tables.refresh_budget_minutes`, embeddings) under `logs/refresh.lock`, so it cannot overlap the nightly task. The table backfill is resumable: report "PDFs awaiting table scan" and pending OCR from `library_stats` |
 | `erla eval` | `run_eval` |
@@ -43,8 +44,8 @@ Site facts: `erla://site/notes` and `site_info`. Library and site paths are set 
 3a. Charts (S7): only when no printed value or equation answers the question and the user wants a chart reading. Call `chart_read(doc_id, locator, x, color)` for one curve. A `REJECTED` result is reported with its gate and reason; try the listed alternative documents (the same figure elsewhere) and read the cleanest. Never estimate a value the tool rejected (G3.3). A value between two curves of a family is never interpolated: report both bracketing readings.
 4. Web only for gaps. Before **every** web search call `web_query_check`; send only `SAFE` queries. The plugin's web gate enforces the same check on every WebSearch/WebFetch and denies a hit, or any call it cannot check, with the reason: rewrite with generic terms or report the gap; never work around it. Tier each web source with `source_tier`.
 5. `verify_packet` on every value, quote and conversion you will report: items `{doc_id, locator, value, units, quantity}`; a material property also gives the `temper`, `direction`, `basis`, `thickness` and `form` you will report, so the value is checked against the column it is printed in; a value read from a table names its row with the `quantity` plus the `material`, `temper`, `form` and `direction` it is printed for, or `row` with the row's label text, so it is checked against that row (a value in several rows that the claim does not tell apart fails as ambiguous); a converted value adds `source_value` + `source_units`; a chart reading is `kind: "chart"` with the `doc_id`, `locator`, `x`, `color` (and `region`, `cross_check`) it was read with, plus `value`, `units` and `quantity`: it passes only if the figure, read again through every gate, gives the value within the reading's uncertainty; a computed value is `kind: "computed"` with `not_covered` stating the method used (this edition has no calculation tools), and the packet states that no specialist reviewed it; a computed value without `not_covered` fails, and each input is verified as its own item. Report as sourced only PASS items; correct and re-verify FAIL items or report them NOT VERIFIED; carry its warnings (OCR, flags, found_at). Reconcile, never average conflicting values (G3.4).
-6. Answer with the Result Packet (rules §6). Exports only via `export_packet`.
-7. `log_request` with the `verification_id` from step 5; user feedback via `record_feedback`.
+6. Independent check per instructions W9 when `site_info` → `check_policy` requires it (or the user asks): `check_open`, the `professor` agent (or a labelled self-check where there are no sub-agents), `check_status`. Then answer with the Result Packet (rules §6), including §G. Exports only via `export_packet`, with the `check_id`.
+7. `log_request` with the `verification_id` from step 5 and `values_reported` (0 for a not-found answer), and the `check_id` (or `unchecked_reason`) when the check policy applies; user feedback via `record_feedback`.
 8. Specialist-field tasks (for example damage tolerance or joints): this edition has no specialist agents; do the work yourself under these protocols and state in the packet that no specialist reviewed it.
 
 ## Plugin controls (user-run)

@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import {
-  askPrompt, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
+  askPrompt, checkPolicyLines, dashboardLink, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
   rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
@@ -53,8 +53,8 @@ test('helpers: stats, sources, file lists, references, preferences', () => {
   expect(md).toMatch(/2\. Fitting allowables \(T1, \*\*ITAR\*\*\)/)
   expect(md).toMatch(/Contains restricted documents/)
 
-  expect(readSettings(undefined)).toEqual({ units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default' })
-  expect(readSettings({ units: 'SI', semantic: 'yes', scope: 'local' })).toEqual({ units: 'SI', semantic: true, excludeRestricted: false, scope: 'local', reranker: 'default' })
+  expect(readSettings(undefined)).toEqual({ units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default', dashboardUrl: null, dashboardShown: false })
+  expect(readSettings({ units: 'SI', semantic: 'yes', scope: 'local' })).toEqual({ units: 'SI', semantic: true, excludeRestricted: false, scope: 'local', reranker: 'default', dashboardUrl: null, dashboardShown: false })
   expect(readSettings({ reranker: 'qwen3-4b' }).reranker).toBe('qwen3-4b')
   expect(readSettings({ reranker: 'gpt-reranker' }).reranker).toBe('default')     // unknown value from an old or edited store
   expect(rerankerArgs(readSettings(undefined))).toEqual({})
@@ -72,9 +72,11 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
   mock.clock(on)
   const rec = { searchText: '{}', lastEval: null as unknown, mcp: [] as string[], searches: [] as Record<string, unknown>[], prompts: [] as string[], store: {} as Record<string, unknown>, refuse: '', reached: [] as string[], gpuReady: false,
     // the install stub: the server offers only erla_setup_status, as after a plugin update
-    stub: null as string | null }
+    stub: null as string | null,
+    // the erla server is not running (the app reports it disconnected)
+    down: false }
   on('tool.list', () => ({ value: [] }))
-  on('mcp.connect', () => ({ value: { isConnected: true, server: 'plugin:erla:erla' } }))
+  on('mcp.connect', () => ({ value: rec.down ? { isConnected: false, server: 'plugin:erla:erla', message: 'not running' } : { isConnected: true, server: 'plugin:erla:erla' } }))
   on('fs.read', ($, e) => {
     if (String(e.path).replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json')) return { value: '{"name": "erla", "version": "0.4.1"}' }
     throw new Error(`ENOENT: ${String(e.path)}`)
@@ -89,7 +91,7 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
     if (e.tool === rec.refuse) return { deny: 'The server-side auto mode classifier gave no verdict' }
     const out: Record<string, unknown> = {
       library_stats: { text: STATS, last_eval: rec.lastEval },
-      site_info: { unit_system: 'US', library_roots: ['D:\\Lib'], erla_version: '0.2.9' },
+      site_info: { unit_system: 'US', library_roots: ['D:\\Lib'], erla_version: '0.2.9', check_policy: 'always' },
       index_status: { status: { state: 'done' }, log_tail: [] },
       index_start: { state: 'running' },
       library_files: { inventory: { handbook: [{ doc_id: 1, title: 'Roark', path: 'Roark.pdf', tier: 'T2', flag: null }], spec: [{ doc_id: 2, title: 'Fitting allowables', path: 'ITAR/X.pdf', tier: 'T1', flag: 'ITAR' }] } },
@@ -148,6 +150,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     }
     expect(await ui.find({ type: 'Select', key: 'units' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^v0\.2\.9$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Independent check \(Professor\): always - every Result Packet$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /erla check-policy auto \| always \| off/ })).toBeDefined()
 
     await ui.input({ key: 'q', text: 'stress concentration shoulder fillet', kind: 'change' })
     await ui.press({ key: 'files' })
@@ -211,7 +215,7 @@ test('toggles persist, reach library_search and the system prompt, and filter Li
   await ui.press({ key: 'restricted' })
   await ui.press({ key: 'semantic' })
   await ui.select({ key: 'units', value: 'SI' })
-  expect(rec.store.settings).toEqual({ units: 'SI', semantic: false, excludeRestricted: true, scope: 'both', reranker: 'default' })
+  expect(rec.store.settings).toEqual({ units: 'SI', semantic: false, excludeRestricted: true, scope: 'both', reranker: 'default', dashboardUrl: null, dashboardShown: false })
   expect(await ui.find({ type: 'Button', text: /☑ Leave out restricted documents/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /☐ Semantic search/ })).toBeDefined()
 
@@ -305,6 +309,12 @@ test('a refused tool says which permission rule to add', async ($, on) => {
   await ui.press({ key: 'files' })
   expect(await ui.find({ type: 'Text', text: /add the permission rule mcp__plugin_erla_erla__library_files/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('check policy is shown with how to change it, never set from the panel', () => {
+  expect(checkPolicyLines(null)).toEqual([])
+  expect(checkPolicyLines('off')[0]).toBe('Independent check (Professor): off - nothing, unless you run /erla:check')
+  expect(checkPolicyLines('sometimes')[0]).toMatch(/treated as auto$/)
 })
 
 test('scope, pages and Open helpers', () => {
@@ -454,5 +464,79 @@ test('the panel charts the last library_search Claude ran and shows the search-q
   rec.searchText = 'not json'                                                    // an unreadable answer keeps the last chart
   await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_search', query: 'x' } as never)
   expect(await ui.find({ type: 'Text', text: /^Peterson$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('dashboard link: https only, so a pasted javascript:, file: or http: address never becomes a link', () => {
+  expect(dashboardLink(' https://claude.ai/artifact/UazUqL7hwRrvwv2vqtrLnT ')).toBe('https://claude.ai/artifact/UazUqL7hwRrvwv2vqtrLnT')
+  for (const bad of ['javascript:alert(1)', 'file:///C:/x.html', 'http://claude.ai/artifact/x', 'claude.ai/artifact/x', '', 'https://', `https://x.io/${'a'.repeat(2050)}`, 42, null]) {
+    expect(dashboardLink(bad)).toBe(null)
+  }
+  // a stored link from an older or hand-edited store is checked again on load
+  expect(readSettings({ dashboardUrl: 'javascript:alert(1)', dashboardShown: true })).toMatchObject({ dashboardUrl: null, dashboardShown: true })
+  expect(readSettings({ dashboardShown: 'yes' }).dashboardShown).toBe(false)
+  // the dashboard never reaches the model's prompt
+  expect(preferencesSection(readSettings({ dashboardUrl: 'https://claude.ai/artifact/x', dashboardShown: true }))).toBe(null)
+})
+
+const DASH = 'https://claude.ai/artifact/UazUqL7hwRrvwv2vqtrLnT'
+
+// the card calls no ERLA tool: it must work with the real server, the install stub and a disconnected one
+for (const state of ['server', 'stub', 'disconnected'] as const) {
+  test(`KPI dashboard card (${state}): off by default, shown from Settings, link saved, opened, copied, hidden`, async ($, on) => {
+    const rec = fake(on)
+    if (state === 'stub') rec.stub = 'Installing ERLA 0.4.3: this takes a few minutes.'
+    rec.down = state === 'disconnected'
+    const copied: string[] = []
+    on('ui.copy', ($, e) => {
+      copied.push(e.text)
+      return { value: { isCopied: true } }
+    })
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'erla', args: '' } as never)
+    const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+    const before = rec.mcp.length
+
+    expect(await ui.find({ type: 'Text', text: /^KPI dashboard$/ })).toBe(undefined)
+    await ui.press({ key: 'dashboard' })
+    expect(await ui.find({ type: 'Text', text: /^KPI dashboard$/ })).toBeDefined()
+    expect(rec.store.settings).toMatchObject({ dashboardShown: true, dashboardUrl: null })
+
+    await ui.input({ key: 'dash-input', text: 'javascript:alert(1)', kind: 'submit' })
+    expect(await ui.find({ type: 'Text', text: /Not saved: paste the dashboard's full https:\/\/ address/ })).toBeDefined()
+    expect(await ui.find({ type: 'Link' })).toBe(undefined)
+    expect(rec.store.settings).toMatchObject({ dashboardUrl: null })
+
+    await ui.input({ key: 'dash-input', text: DASH, kind: 'submit' })
+    expect(rec.store.settings).toMatchObject({ dashboardUrl: DASH, dashboardShown: true })
+    const link = await ui.find({ type: 'Link' })
+    expect(link?.props).toMatchObject({ href: DASH })
+    expect(await ui.find({ key: 'dash-input' })).toBe(undefined)
+
+    await ui.press({ key: 'dash-copy' })
+    expect(copied).toEqual([DASH])
+    expect(await ui.find({ type: 'Text', text: /Dashboard link copied/ })).toBeDefined()
+
+    await ui.press({ key: 'dash-hide' })
+    expect(await ui.find({ type: 'Text', text: /^KPI dashboard$/ })).toBe(undefined)
+    expect(rec.store.settings).toMatchObject({ dashboardShown: false, dashboardUrl: DASH })   // hiding keeps the link
+    await ui.press({ key: 'dashboard' })
+    expect((await ui.find({ type: 'Link' }))?.props).toMatchObject({ href: DASH })
+
+    await ui.press({ key: 'dash-change' })
+    expect(await ui.find({ type: 'Link' })).toBe(undefined)
+    expect(await ui.find({ key: 'dash-input' })).toBeDefined()
+    expect(rec.mcp.length).toBe(before)                                                   // no ERLA tool was called
+    await ui.unmount()
+  })
+}
+
+test('a dashboard link saved in an earlier session comes back with the card', async ($, on) => {
+  const rec = fake(on)
+  rec.store.settings = { dashboardUrl: DASH, dashboardShown: true }
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'terminal', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  expect((await ui.find({ type: 'Link' }))?.props).toMatchObject({ href: DASH })
   await ui.unmount()
 })

@@ -3,9 +3,40 @@
 
 import type { EvalSummary, FileHit, LastSearch, PanelSettings, PanelView, RankedHit, Source } from '../types'
 
-export const DEFAULT_SETTINGS: PanelSettings = { units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default' }
+export const DEFAULT_SETTINGS: PanelSettings = {
+  units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default', dashboardUrl: null, dashboardShown: false,
+}
+
+// the KPI dashboard card's link: an https address only (a desktop link opens nothing else, and a
+// javascript:, file: or plain http: link pasted by mistake must not become a button), else null
+export function dashboardLink(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const text = raw.trim()
+  if (!text || text.length > 2048) return null
+  let url: URL
+  try {
+    url = new URL(text)
+  } catch {
+    return null
+  }
+  return url.protocol === 'https:' && url.hostname ? url.href : null
+}
 
 // the control panel's re-ranker choices; the GPU ones need PyTorch with CUDA (erla rerank.status)
+// The Professor's check policy (ADR-0002) is the person's decision: set only with `erla check-policy` in a
+// terminal, never from the panel, because any tool the panel could call the model could call too and then
+// switch its own check off. The panel shows it and says how to change it.
+export function checkPolicyLines(policy: string | null): string[] {
+  if (!policy) return []
+  const what: Record<string, string> = {
+    auto: 'computed values, discipline work and design values',
+    always: 'every Result Packet',
+    off: 'nothing, unless you run /erla:check',
+  }
+  return [`Independent check (Professor): ${policy} - ${what[policy] ?? 'unknown value, treated as auto'}`,
+    'Change it in a terminal: erla check-policy auto | always | off (only you can change it)']
+}
+
 export const RERANKER_OPTIONS = [
   { value: 'default', label: 'ms-marco MiniLM (default, fast)' },
   { value: 'bge-v2-m3', label: 'BGE reranker v2-m3 (CPU, slower)' },
@@ -30,6 +61,8 @@ export function readSettings(stored: unknown): PanelSettings {
     excludeRestricted: typeof s.excludeRestricted === 'boolean' ? s.excludeRestricted : DEFAULT_SETTINGS.excludeRestricted,
     scope: s.scope === 'local' || s.scope === 'web' ? s.scope : 'both',
     reranker: isReranker(s.reranker) ? s.reranker : 'default',
+    dashboardUrl: dashboardLink(s.dashboardUrl),
+    dashboardShown: typeof s.dashboardShown === 'boolean' ? s.dashboardShown : DEFAULT_SETTINGS.dashboardShown,
   }
 }
 

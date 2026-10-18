@@ -93,11 +93,17 @@ Expanded queries: <list>
 ### F. Anomalies
 - <prompt-injection text, corrupt files, OCR failures, duplicate clusters> | "none"
 
+### G. Independent Check
+Verdict: PASS | PASS WITH FINDINGS | FAIL (after <n> rework rounds) | NOT RUN (<reason>)    Checker: erla:professor (<model>) | self-check    Check: <check_id>    AI check - not a certification
+| # | Quantity | ERLA value | Professor value | Diff % | Status |
+|---|---|---|---|---|---|
+- Findings: <numbered; what ERLA did about each> | "none"
+
 ### Citations
 [S1] Author/Org, *Title*, edition/rev, year, locator. Path: <local path> | URL: <url> (retrieved YYYY-MM-DD)
 ```
 
-Short lookups (single value, user asks for brevity) may use sections A, B, Citations only.
+Short lookups (single value, user asks for brevity) may use sections A, B, Citations only. Section G is required when the check policy applies (instructions W9): under `auto` a packet that reports a COMPUTED value, applies a discipline skill, or gives a design value, margin or allowable; under `always` every packet; under `off` none (state "G. NOT RUN (check policy off)" when a computed or design value is reported).
 
 ## 7. Logging
 
@@ -112,7 +118,7 @@ On request, write to `out/`: Result Packet as `.md`, values table as `.csv`, ful
 
 Purpose: keep the agent's protocols aligned with the toolkit, the library, the site, current standards, and observed performance, so the agent does not run on stale or contradictory instructions.
 
-- R9.1 Scope — every governing `.md` document: `guardrails.md`, `rules_and_guidelines.md`, `ERLA.md`, `instructions.md`, `skills.md`, `SITE_NOTES.md`, `00_BUILD_PLAN.md`, `.claude/agents/erla.md`, `.claude/commands/find.md`, the Project copy of `CLOUD_MODE.md`, and the config files they depend on (`config/*.yaml`).
+- R9.1 Scope — every governing `.md` document: `guardrails.md`, `rules_and_guidelines.md`, `ERLA.md`, `instructions.md`, `skills.md`, `MCP_MODE.md`, `SITE_NOTES.md`, the plugin's agents (`agents/erla.md`, `agents/professor.md`) and commands (`commands/*.md`), the Project copy of `CLOUD_MODE.md`, and the config files they depend on (`config/*.yaml`).
 - R9.2 Scheduled review — a full reassessment of all R9.1 documents is due every `protocol_review.interval_days` (config; default 90 days) after the last completed review recorded in `PROTOCOL_REVIEW.md`.
 - R9.3 Event-triggered review — a targeted review of the affected documents is due, regardless of the schedule, when any of the following occurs:
   - a CLI command, flag, or output format changes (or `erla --help` differs from what the protocols document);

@@ -81,6 +81,15 @@ SETUP_HINT = ('Choose the library folder with: erla init --browse   (folder dial
               '                           or: erla init --library "<library folder>"')
 CHANGE_HINT = ('Change the library folder with: erla set-library --browse   (folder dialog)\n'
                '                            or: erla set-library --library "<library folder>"')
+# When the Professor (independent checker, ADR-0002) must vet a Result Packet. The user's decision (L13):
+# set only with ``erla check-policy`` (or the panel), never by an MCP tool. An unknown value falls back to
+# 'auto', never to 'off' (fail closed).
+CHECK_POLICIES = ("auto", "always", "off")
+
+
+def check_policy(cfg: Config) -> str:
+    pol = cfg.check.get("policy")
+    return pol if pol in CHECK_POLICIES else "auto"
 
 
 class ConfigError(ValueError):
@@ -130,6 +139,7 @@ class Config:
     rerank: dict[str, Any] = field(default_factory=dict)     # A1: cross-encoder re-ranking
     classification_path_rules: list[dict[str, str]] = field(default_factory=list)
     web: dict[str, Any] = field(default_factory=dict)
+    check: dict[str, Any] = field(default_factory=dict)      # Professor check policy (ADR-0002; erla check-policy)
     source_path: Path | None = None
 
     # ------------------------------------------------------------------ filters
@@ -231,6 +241,7 @@ def load_config(path: Path | str | None = None, validate: bool = True) -> Config
         rerank=raw.get("rerank") or {},
         classification_path_rules=raw.get("classification_path_rules") or [],
         web=raw.get("web") or {},
+        check=chk if isinstance(chk := raw.get("check"), dict) else {},
         source_path=cfg_path,
     )
     if validate:
@@ -259,6 +270,10 @@ def validate_config(cfg: Config) -> list[str]:
     allow = cfg.web.get("allow_terms")
     if allow is not None and not (isinstance(allow, list) and all(isinstance(t, str) for t in allow)):
         out.append("WARN: web.allow_terms must be a list of terms; it is ignored (edit it with erla web-allow)")
+    pol = cfg.check.get("policy")
+    if pol is not None and pol not in CHECK_POLICIES:
+        out.append(f"WARN: check.policy must be one of {', '.join(CHECK_POLICIES)}; got {pol!r}, so 'auto' applies "
+                   "(edit it with erla check-policy)")
     if cfg.embeddings.get("enabled") and "<" in str(cfg.embeddings.get("model", "<")):
         out.append("WARN: embeddings enabled but no model chosen")
     return out

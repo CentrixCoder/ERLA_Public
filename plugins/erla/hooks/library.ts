@@ -4,6 +4,8 @@
 export type SiteInfo = {
   unit_system?: string
   erla_version?: string
+  // the user's Professor check policy (erla check-policy): auto | always | off
+  check_policy?: string
   configured?: boolean
   library_roots?: string[]
   error?: string

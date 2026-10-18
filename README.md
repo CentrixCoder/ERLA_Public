@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,23 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.5.0
+
+In short: an independent checker now vets ERLA's computed and design answers before you see them.
+- **The Professor.** A second ERLA agent checks an answer on its own: it re-opens every source, works out
+  each value itself before it sees ERLA's, and runs sanity checks (units, magnitudes, method limits,
+  conservative assumptions). Its verdict - PASS, PASS WITH FINDINGS or FAIL - appears in a new
+  section G of the Result Packet. It is an AI check, not a certification and not a substitute for the
+  checker of record.
+- **Checked in code, not on trust.** The checker cannot see ERLA's numbers until it has recorded its
+  own; the comparison is computed by code; a verdict that contradicts it is refused. A packet that needs
+  a check cannot be logged or exported without one, or without a stated reason it could not run.
+- **You decide when it runs.** `erla check-policy auto|always|off` in a terminal (default `auto`:
+  answers with computed or design values). Only you can change it; the control panel's Settings card
+  shows the current choice. `/erla:check` checks any answer, or your own hand calculation, on request.
+- **Sharper value checks.** A table value is confirmed in its row and column, or reported as
+  unconfirmed; an honest "not found" answer is no longer logged as unverified.
+
 ### 0.4.2
 
 In short: right after an install or update, the control panel tells you what to do instead of showing errors.
@@ -36,31 +53,6 @@ In short: the control panel now shows how well each source matches your question
   is right: ERLA still checks every value against its source.
 - **Search quality.** The Status card shows ERLA's score on your own test questions (nDCG@10) from the last
   `erla eval` run, or "not measured yet", and warns when there are too few questions (under 30) to rely on.
-
-### 0.4.0
-
-In short: better search at the same speed, values read from charts in your library (refused when a chart
-cannot be read reliably), and a choice of re-rankers. Every value ERLA reports is still checked against
-its source before it reaches you.
-- **Better search ranking at the same speed.** Searches put the right source first more often and find
-  more of the right documents in the top 10, with no slowdown and nothing ranked worse on our test queries
-  (ranking score 0.758 to 0.782 on material-property questions, right document in the top 10 from 94 % to
-  97 %).
-- **Choose your re-ranker.** The control panel has a re-ranker setting. The default stays fast. BGE
-  reranker v2-m3 (CPU, about 5x slower, downloads 0.57 GB once) finds more of the right documents for
-  broad research questions. With an NVIDIA graphics card (about 10 GB of memory) and PyTorch, you can
-  pick Qwen3-Reranker-4B, the best for broad research questions; for material values the default ranks
-  better. If your computer cannot run a choice, the panel says why and how to fix it.
-- **Primary and corroborating sources.** Each search names the best-supported source and the
-  high-authority sources that confirm it.
-- **Source memory.** Values that passed verification help later searches on the same topic find the
-  same document again. Memory never adds documents and is dropped when a file changes.
-- **Chart reading that refuses rather than guesses.** ERLA can read a value off a figure in your
-  library, but only when the axes, the curve and the point are clear; otherwise it says why it refused
-  and where else the same figure appears. It never extrapolates or reads between curves, and printed
-  equations and tables come first.
-- **Search quality score.** `erla eval` reports nDCG@10, a standard ranking score, and can compare
-  re-rankers on your own golden queries.
 
 <!-- release-notes:end -->
 

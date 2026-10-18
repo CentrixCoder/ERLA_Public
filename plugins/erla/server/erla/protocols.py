@@ -19,7 +19,7 @@ from pathlib import Path
 from .edition import render
 
 SECTION = re.compile(r"^## (\d+)\.", re.M)
-BLOCK_HEAD = re.compile(r"^(?:- )?\*\*((?:[A-Z]+-)?[A-Z]{1,2}\d+)\b")
+BLOCK_HEAD = re.compile(r"^(?:- )?\*\*((?:[A-Z]+-)?[A-Z]{1,2}\d+)\b|^### ((?:[A-Z]+-)?[A-Z]{1,2}\d+)\b")
 
 
 def _sections(text: str) -> list[tuple[str, int, int]]:
@@ -39,10 +39,10 @@ def _blocks(text: str) -> dict[str, str]:
         if cur is not None:
             out.setdefault(cur, "\n".join(buf).strip())
     for line in lines:
-        m = BLOCK_HEAD.match(line)
-        if m or line.startswith("#"):
+        m = BLOCK_HEAD.match(line)                    # '### XX-S0 ...' headings are blocks too (lesson
+        if m or line.startswith("#"):                  # 2026-10-13: protocol_section missed the S0 checklist)
             flush()
-            cur, buf = (m.group(1), [line]) if m else (None, [])
+            cur, buf = (m.group(1) or m.group(2), [line]) if m else (None, [])
             continue
         if cur is not None:
             if line.startswith("- ") and buf and buf[0].startswith("- "):
@@ -56,7 +56,7 @@ def _blocks(text: str) -> dict[str, str]:
 
 def _first_sentence(block: str) -> str:
     head = block.splitlines()[0]
-    head = re.sub(r"^(?:- )?\*\*", "", head)
+    head = re.sub(r"^(?:- )?\*\*|^### ", "", head)
     return head.split("**")[0].strip()[:140]
 
 

@@ -43,6 +43,11 @@ export type PanelSettings = {
   scope: 'local' | 'web' | 'both'
   // library_search re-ranker: 'default' (BGE v2-m3 on the CPU) or a GPU LLM re-ranker (PyTorch + CUDA)
   reranker: 'default' | 'bge-v2-m3' | 'qwen3-4b'
+  // the person's own KPI dashboard (an https link, e.g. a claude.ai artifact), opened from the panel's
+  // KPI dashboard card; null until they paste one. Never shipped with the plugin: each user's is private
+  dashboardUrl: string | null
+  // whether the panel shows the KPI dashboard card (off by default; Settings or the card's Hide changes it)
+  dashboardShown: boolean
 }
 
 // a document opened with library_show this session, for feedback and the reference list
@@ -97,6 +102,8 @@ export type PanelView = {
   ocrPending: number | null
   vectors: number | null
   configUnits: string | null
+  // site_info check_policy: when the Professor checks a Result Packet; shown, never set, by the panel
+  checkPolicy: string | null
   // the running ERLA server's version (site_info erla_version), shown in the header
   version: string | null
   // this plugin copy's version (its plugin.json), shown when the server cannot say

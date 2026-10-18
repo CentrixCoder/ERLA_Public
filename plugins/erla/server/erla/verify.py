@@ -14,20 +14,31 @@ Item kinds:
             over 15 words is a G5.2 warning.
   computed  a calculated value (0.2.19, law L1). With ``calc_id`` (returned by an installed specialist's
             calculation tool) and ``calc_output`` (a result name) the value is checked against that
-            recorded run; ``scale`` 2 or 0.5 converts a half length to a total one or back.
+            recorded run; ``scale`` 2 or 0.5 converts a half length to a total one or back. Any other
+            factor is a declared relation (0.4.3): ``scale`` plus the ``equation`` it comes from
+            (e.g. a width of six critical half lengths); code recomputes factor x output, the
+            relation itself is the model's and is shown in the evidence.
             Without a run it needs ``not_covered`` (why no tool applies): status COMPUTED, model
             arithmetic not checked by code. Neither: FAIL - a hand calculation cannot pass silently.
             Verify each input as its own value item either way.
 
 Conditions (0.2.16): a value item may claim ``temper`` (or ``condition``), ``direction``, ``basis``,
 ``thickness`` and ``form``. The value must then belong to those conditions in the property records at
-that page - a number printed for H1150 fails when reported as H900. A condition the parser could not
-read for that column is a warning, never a failure.
+that page - a number printed for H1150 fails when reported as H900. A condition the table does not
+print for that column is a warning. A value printed once over several columns (a merged cell, E over
+every sheet column) counts for each column it spans (0.4.3, ``props.spanned_records``).
 
 Table rows (0.2.20): a value that sits in an extracted table row is checked against the row the item
 names (``quantity``, ``material``, ``temper``, ``form``, ``direction`` or free-text ``row``), unless a
 property record already confirmed its conditions. A number printed in another row fails; one printed in
 several rows that the claim does not tell apart fails as ambiguous. The result names the ``row``.
+
+Unconfirmed (0.4.3): a number on the page proves nothing about the row or column it is claimed for. A
+table value whose claimed context (conditions, material or row) no property record and no table row
+confirms - the table was not extracted, the column heading is ambiguous, or the claim names a column
+heading the rows do not carry - is UNCONFIRMED, never PASS; so is a material property (Ftu, Fty, E, ...)
+read from a table the extractor could not read. UNCONFIRMED is not verified: the overall result is not
+PASS.
 
 Locators resolve as in ``library_show``: exact match, else prefix. A value found only in the chunk
 next to the cited one passes with a warning naming where it is (``found_at``).
@@ -51,7 +62,10 @@ SNIPPET = 60
 QUOTE_MAX_WORDS = 15      # G5.2
 
 RULE = ("Report as verified only items with status PASS. FAIL: correct the value or locator and verify "
-        "again, or report the value as NOT VERIFIED; never report it as sourced (G3.1/G3.2). A computed "
+        "again, or report the value as NOT VERIFIED; never report it as sourced (G3.1/G3.2). UNCONFIRMED: "
+        "the number is on the page but code could not confirm the row or column it is claimed for; read "
+        "them on the page and report the value as NOT VERIFIED by code, or cite a locator whose table "
+        "confirms it. A computed "
         "value passes only against a recorded calc run (calc_id + calc_output); COMPUTED (not_covered) "
         "is model arithmetic: show the equation, say why the calc tool did not apply, and verify each input as its own "
         "item. Carry every warning into the packet "
@@ -102,7 +116,7 @@ class _Doc:
         from .store import quality_expr
         self.row = con.execute("SELECT doc_id, title, path, classification_flag, ocr_used FROM documents "
                                "WHERE doc_id=?", (doc_id,)).fetchone()
-        self.chunks = con.execute(f"SELECT seq, locator, text, {quality_expr(con, 'chunks')} FROM chunks "
+        self.chunks = con.execute(f"SELECT seq, locator, text, has_table, {quality_expr(con, 'chunks')} FROM chunks "
                                   "WHERE doc_id=? ORDER BY seq", (doc_id,)).fetchall() if self.row else []
 
     def at(self, locator: str) -> list[sqlite3.Row]:
@@ -180,10 +194,65 @@ def _check_value(con: sqlite3.Connection, doc: _Doc, sel: list[sqlite3.Row], ite
 
     if converted:
         _check_conversion(item, res)
+    confirmed: set[str] = set()
+    unread: dict[str, str] = {}
+    where = "record"
     if res["status"] == "PASS" and len(want) == 1:
-        _check_conditions(con, int(doc.row["doc_id"]), str(row["locator"]), want[0], item, res)
+        confirmed, unread = _check_conditions(con, doc, str(row["locator"]), want[0], item, res)
     if res["status"] == "PASS" and "conditions" not in res:      # not already confirmed by a property record
-        _check_row(doc, str(row["locator"]), want, item, res)
+        where, in_row = _check_row(doc, str(row["locator"]), want, item, res)
+        confirmed |= in_row
+    if res["status"] == "PASS":
+        _check_context(item, res, confirmed, unread, where, bool(row["has_table"]))
+
+
+CONTEXT = ("material", "temper", "form", "thickness", "basis", "direction", "row")
+
+
+def _context_claims(item: dict[str, Any]) -> dict[str, str]:
+    """The row and column an item claims for its value (``condition`` is an alias of ``temper``)."""
+    out = {f: str(item[f]) for f in CONTEXT if f != "temper" and item.get(f)}
+    if item.get("temper") or item.get("condition"):
+        out["temper"] = str(item.get("temper") or item.get("condition"))
+    return out
+
+
+def _check_context(item: dict[str, Any], res: dict[str, Any], confirmed: set[str], unread: dict[str, str],
+                   where: str, table_page: bool) -> None:
+    """A PASS needs the claimed row and column confirmed, not just the number found (0.4.3, law L3). On a
+    table page every number of the table is "on the page": 52 ksi from the 2.001-2.500 in column passed for
+    2.501-3.000 in, and a grade 2 tensile strength passed as a grade 5 proof strength. ``where``: "record"
+    (a property record holds the value), "row" (an extracted table row), "prose" (the page's tables do not
+    hold it) or "none" (no table here was extracted)."""
+    claims = _context_claims(item)
+    value = item.get("value")
+    if unread:
+        why = "; ".join(f"{f} {claims[f]}: {w}" for f, w in unread.items())
+        res.update(status="UNCONFIRMED", reason=(
+            f"{value} is printed at this locator, but its column is not confirmed ({why}): read the column "
+            "heading on the page and report the value as NOT VERIFIED by code"))
+        return
+    if where in ("record", "prose") or (where == "none" and not table_page):
+        return
+    open_ = {f: v for f, v in claims.items() if f not in confirmed}
+    if where == "row" and open_:
+        res.update(status="UNCONFIRMED", reason=(
+            f"{value} is in the row {res.get('row')}, but no property record or row label confirms "
+            f"{', '.join(f'{k} {v}' for k, v in open_.items())} (a column heading?): read the column on the page "
+            "and report the value as NOT VERIFIED by code"))
+        return
+    if where != "none":
+        return
+    from .props import QUANTITY_PATTERNS, canonical_quantity
+    quantity = str(item.get("quantity") or "")
+    is_property = canonical_quantity(quantity) in {q for q, _ in QUANTITY_PATTERNS} if quantity else False
+    if open_ or is_property:
+        res.update(status="UNCONFIRMED", reason=(
+            f"{value} is on the page, but in a table that was not extracted (no table rows or property records "
+            f"here), so code cannot tell which row and column it is printed in"
+            + (f" ({', '.join(f'{k} {v}' for k, v in open_.items())} not confirmed)" if open_ else "")
+            + ": read the row and column on the page and report the value as NOT VERIFIED by code, or verify a "
+            "sentence that states it as a quote"))
 
 
 # ------------------------------------------------------------------ table rows (0.2.20)
@@ -233,15 +302,18 @@ def _table_rows(doc: _Doc, page: str) -> list[list[tuple[list[str], list[str]]]]
     return tables
 
 
-def _check_row(doc: _Doc, locator: str, want: list[float], item: dict[str, Any], res: dict[str, Any]) -> None:
+def _check_row(doc: _Doc, locator: str, want: list[float], item: dict[str, Any],
+               res: dict[str, Any]) -> tuple[str, set[str]]:
     """A table value must sit in the row the item claims (0.2.20). The page text flattens tables, so the
     number alone can be found in another row (a KIc printed for one alloy passed for another). The claim
     names its row by material, temper (or condition), form, direction or free-text ``row``; a value in
-    rows with different labels and no claim that tells them apart fails as ambiguous."""
+    rows with different labels and no claim that tells them apart fails as ambiguous. Returns where the
+    value is ("none": no extracted table here, "prose": not in a table row, "row") and the claimed fields
+    the value's row carries."""
     page = re.sub(r"\s+table\s+\d+$", "", locator.strip().lower())
     tables = _table_rows(doc, page)
     if not tables:
-        return
+        return "none", set()
     claims = {f: str(item.get("condition") if f == "temper" and not item.get("temper") else item.get(f))
               for f in ROW_FIELDS if item.get(f) or (f == "temper" and item.get("condition"))}
     if "quantity" in claims:                                  # the stored code (Fty) and the user's word (yield)
@@ -284,7 +356,7 @@ def _check_row(doc: _Doc, locator: str, want: list[float], item: dict[str, Any],
         hits += found_in
         candidates += [h for h in found_in if not any(contradicts(o, h[2], h[0]) for o in others)]
     if not hits:
-        return                                                # the number is in prose, not in a table row
+        return "prose", set()                                 # the number is in prose, not in a table row
     for f in sorted(set(claims) - seen):
         res["warnings"].append(f"{f} '{claims[f]}' labels no table row here (a column heading?): confirm it on the page")
     shown = "; ".join(" ".join(x for x in lab if x) or "(unlabelled row)" for lab, _, _ in hits[:5])
@@ -292,18 +364,19 @@ def _check_row(doc: _Doc, locator: str, want: list[float], item: dict[str, Any],
         res.update(status="FAIL", reason=(f"{item.get('value')} is printed in the row(s) {shown}, not in the row for "
                                           f"{', '.join(f'{k} {v}' for k, v in claims.items())}: cite the right "
                                           "row's value or correct the claim"))
-        return
+        return "row", set()
     top = max(len(s) for _, _, s in candidates)
-    best = [(lab, dat) for lab, dat, s in candidates if len(s) == top]
-    labels = {tuple(x for x in lab if x) for lab, _ in best}
+    best = [(lab, dat, s) for lab, dat, s in candidates if len(s) == top]
+    labels = {tuple(x for x in lab if x) for lab, _, _ in best}
     if len(labels) > 1:
         res.update(status="FAIL", reason=(f"{item.get('value')} appears in {len(labels)} rows here that the claim does "
                                           f"not tell apart ({'; '.join(' '.join(x) or '(unlabelled row)' for x in sorted(labels)[:5])}): "
                                           "name the row (quantity, material, temper, form, direction or row)"))
-        return
-    lab, dat = best[0]
+        return "row", set()
+    lab, dat, pos = best[0]
     res["row"] = " ".join(x for x in lab if x)
     res["evidence"] = " | ".join(lab + dat)[:240]
+    return "row", set(pos)
 
 
 CONDITIONS = ("temper", "direction", "basis", "thickness", "form")
@@ -343,51 +416,95 @@ def _compatible(field: str, claim: str, rec: str | None) -> bool | None:
     return bool(c) and (c <= r or r <= c)       # "T6" in "T6, T62a"; "plate" in "sheet and plate"
 
 
-def _check_conditions(con: sqlite3.Connection, doc_id: int, locator: str, value: float, item: dict[str, Any],
-                      res: dict[str, Any]) -> None:
+Record = dict[str, Any]
+
+
+def _best(rows: list[Record], claims: dict[str, str]) -> tuple[Record | None, dict[str, bool | None]]:
+    """The first record no claimed condition contradicts, preferring one that confirms them all."""
+    best: Record | None = None
+    verdicts: dict[str, bool | None] = {}
+    for r in rows:
+        unresolved = "TEMPER_UNRESOLVED" in (r["flags"] or "")
+        v = {f: (None if f == "temper" and unresolved else _compatible(f, c, r[f])) for f, c in claims.items()}
+        if all(x is not False for x in v.values()):
+            best, verdicts = r, v
+            if None not in v.values():
+                break
+    return best, verdicts
+
+
+def _spanned(doc: _Doc, locator: str) -> list[Record]:
+    """Records for the columns a merged value cell spans on this page (props.spanned_records)."""
+    from .props import spanned_records
+    page = locator.strip().lower()
+    out: list[Record] = []
+    for ch in doc.chunks:
+        loc = str(ch["locator"]).lower()
+        if (loc == page or loc.startswith(page + " ")) and "|" in str(ch["text"] or ""):
+            out += [{**r, "flags": json.dumps(r["flags"])} for r in spanned_records(str(ch["text"]))]
+    return out
+
+
+def _check_conditions(con: sqlite3.Connection, doc: _Doc, locator: str, value: float, item: dict[str, Any],
+                      res: dict[str, Any]) -> tuple[set[str], dict[str, str]]:
     """A value can be on the cited page and still belong to another column (H1150, not H900). When the
-    item claims conditions, the property records for that value at that page must agree (0.2.16)."""
+    item claims conditions, the property records for that value at that page must agree (0.2.16).
+    Returns the claimed conditions a record confirmed, and those it could not confirm with why (a column
+    heading flagged ambiguous, or none of the claim confirmed): those make the item UNCONFIRMED."""
     claims = {f: str(item.get(f) if f != "temper" else item.get("temper") or item.get("condition"))
               for f in CONDITIONS if item.get(f) or (f == "temper" and item.get("condition"))}
     if not claims:
-        return
+        return set(), {}
     from .store import has_table
-    rows: list[sqlite3.Row] = []
+    stored: list[sqlite3.Row] = []
     if has_table(con, "properties"):
-        rows = con.execute(
+        stored = con.execute(
             "SELECT quantity, value, temper, direction, basis, thickness, form, flags FROM properties "
             "WHERE doc_id=? AND (lower(locator) = lower(?) OR lower(locator) LIKE lower(?) || ' %')",
-            (doc_id, locator, locator)).fetchall()
-    rows = [r for r in rows if r["value"] is not None and math.isclose(r["value"], value, rel_tol=1e-9)]
+            (int(doc.row["doc_id"]), locator, locator)).fetchall()
+    q = None
     if item.get("quantity"):
         from .props import canonical_quantity
         q = canonical_quantity(str(item["quantity"]))
-        rows = [r for r in rows if r["quantity"] == q] or rows
+
+    def of_value(recs: list[Record]) -> list[Record]:
+        recs = [r for r in recs if r["value"] is not None and math.isclose(r["value"], value, rel_tol=1e-9)]
+        return [r for r in recs if r["quantity"] == q] or recs if q else recs
+
+    rows = of_value([dict(r) for r in stored])
     if not rows:
         res["warnings"].append(f"conditions ({', '.join(f'{k} {v}' for k, v in claims.items())}) not checked: "
                                "no property record for this value here - confirm the column heading on the page")
-        return
-    best: sqlite3.Row | None = None
-    unknown: set[str] = set()
-    for r in rows:
-        unresolved = "TEMPER_UNRESOLVED" in (r["flags"] or "")
-        verdicts = {f: (None if f == "temper" and unresolved else _compatible(f, c, r[f])) for f, c in claims.items()}
-        if all(v is not False for v in verdicts.values()):
-            best, unknown = r, {f for f, v in verdicts.items() if v is None}
-            if not unknown:
-                break
+        return set(), {}
+    best, verdicts = _best(rows, claims)
+    if best is None or None in verdicts.values():          # a merged cell may span the claimed column
+        span, sv = _best(of_value(_spanned(doc, locator)), claims)
+        if span is not None and (best is None or None not in sv.values()):
+            best, verdicts = span, sv
+            res["warnings"].append("printed once across several columns (a merged cell spanning the claimed "
+                                   "column, read from its blank neighbours): confirm the span on the page")
     if best is None:
         seen = "; ".join(sorted({", ".join(f"{f} {r[f]}" for f in claims if r[f]) for r in rows}))[:300]
         res.update(status="FAIL", reason=(f"{item.get('value')} at {locator} is printed for {seen or 'other conditions'}, "
                                           f"not {', '.join(f'{k} {v}' for k, v in claims.items())}: "
                                           "read the column heading and correct the conditions or the value"))
-        return
+        return set(), {}
     res["conditions"] = {f: best[f] for f in claims}
+    confirmed = {f for f, v in verdicts.items() if v}
+    unknown = {f for f, v in verdicts.items() if v is None}
+    unread: dict[str, str] = {}
     if unknown:
-        ambiguous = [x for x in json.loads(best["flags"] or "[]")
-                     if x.startswith("CONDITION_AMBIGUOUS: ") and x.split()[1] in unknown]
+        flags = cast(list[str], json.loads(best["flags"] or "[]"))
+        ambiguous = [x for x in flags if x.startswith("CONDITION_AMBIGUOUS: ") and x.split()[1] in unknown]
         res["warnings"].append(f"{', '.join(sorted(unknown))} not confirmed (not parsed for this column): "
                                "check the heading on the page" + "".join(f" [{x}]" for x in ambiguous))
+        for f in sorted(unknown):
+            hit = next((x for x in ambiguous if x.split()[1] == f), None)
+            if hit or (f == "temper" and any(x.startswith("TEMPER_UNRESOLVED") for x in flags)):
+                unread[f] = "the column's heading is ambiguous"
+            elif not confirmed:
+                unread[f] = "the table prints none for this column, and no other claimed condition is confirmed"
+    return confirmed, unread
 
 
 def _check_conversion(item: dict[str, Any], res: dict[str, Any]) -> None:
@@ -460,17 +577,24 @@ def _check_computed(item: dict[str, Any], res: dict[str, Any], calc_runs: dict[s
                                                  "so state not_covered with the method used")
             return
         quantity = str(item.get("quantity") or "")
+        # The quantity's name, not its equation: a width derived from a critical length is not a critical
+        # length (0.4.3: it was refused as if the calc tool computed it).
+        name, _, derivation = quantity.partition("=")
         for tool, (required, _) in tools.items():
-            if required.search(quantity):                    # 0.2.20 / 0.3.0: no hand calculation of these
-                res.update(status="FAIL", reason=f"{tool} computes '{quantity}': call {tool} and pass calc_id + "
+            if required.search(name):                        # 0.2.20 / 0.3.0: no hand calculation of these
+                res.update(status="FAIL", reason=f"{tool} computes '{name.strip()}': call {tool} and pass calc_id + "
                                                  f"calc_output (not_covered is for methods {tool} does not cover)")
                 return
         res.update(status="COMPUTED", reason=f"outside {' and '.join(tools)}: {reason}" if tools
                    else f"no calculation tool installed: {reason}")
         res["warnings"].append("model arithmetic, not checked by code (L3): show the equation; verify each input")
-        for tool, (_, covered) in tools.items():
-            if covered.search(quantity):
-                res["warnings"].append(f"{tool} may compute '{quantity}': use it unless the stated reason holds")
+        for tool, (required, covered) in tools.items():
+            if required.search(derivation):
+                res["warnings"].append(f"derived from a {tool} result: if it is a factor times that result, pass the "
+                                       f"run's calc_id and calc_output with scale (the factor) and equation, and "
+                                       "code recomputes it")
+            elif covered.search(name):
+                res["warnings"].append(f"{tool} may compute '{name.strip()}': use it unless the stated reason holds")
         return
     run = calc_runs.get(calc_id)
     if run is None:
@@ -487,8 +611,11 @@ def _check_computed(item: dict[str, Any], res: dict[str, Any], calc_runs: dict[s
         scale = float(item.get("scale") or 1)
     except (TypeError, ValueError):
         scale = math.nan
-    if scale not in CALC_SCALES:
-        res.update(status="FAIL", reason="scale must be 1, 2 (half length to total crack length) or 0.5")
+    equation = str(item.get("equation") or "").strip()
+    if not (math.isfinite(scale) and scale != 0) or (scale not in CALC_SCALES and not equation):
+        res.update(status="FAIL", reason="scale must be 1, 2 (half length to total crack length) or 0.5; any other "
+                                         "finite factor needs the equation it comes from (a declared relation, "
+                                         "e.g. scale 6 with equation 'W = 3 (2 a) = 6 a')")
         return
     found = numbers(str(item.get("value") or ""))
     if not found:
@@ -499,12 +626,17 @@ def _check_computed(item: dict[str, Any], res: dict[str, Any], calc_runs: dict[s
     tol = max(0.5 * 10 ** -decimals(written), 0.005 * abs(expect))
     res["calc"] = {"calc_id": calc_id, "task": run.get("task"), "output": name, "result": outputs[name],
                    "scale": scale, "units": run.get("units"), "module": run.get("module")}
+    relation = scale not in CALC_SCALES
+    if relation:
+        res["calc"]["equation"] = equation
+    shown = f"{_tool(run)} {calc_id} {name} = {outputs[name]:.6g}" + (f" x {scale:g}" if scale != 1 else "")
     if abs(v - expect) <= tol * (1 + 1e-9):
-        res.update(status="PASS", evidence=f"{_tool(run)} {calc_id} {name} = {outputs[name]:.6g}"
-                                           + (f" x {scale:g}" if scale != 1 else "") + f" ({run.get('module')})")
+        res.update(status="PASS", evidence=shown + (f" [{equation}]" if relation else "") + f" ({run.get('module')})")
+        if relation:
+            res["warnings"].append(f"declared relation '{equation}': code checked the arithmetic ({scale:g} x {name}), "
+                                   "not the relation; state its source and validity limits")
     else:
-        res.update(status="FAIL", reason=f"{written} does not match {_tool(run)} {name} = {outputs[name]:.6g}"
-                                         + (f" x {scale:g}" if scale != 1 else "") + f" = {expect:.6g}")
+        res.update(status="FAIL", reason=f"{written} does not match {shown} = {expect:.6g}")
 
 
 def _check_chart(con: sqlite3.Connection, cfg: Any, item: dict[str, Any], res: dict[str, Any]) -> None:
@@ -589,8 +721,8 @@ def verify_items(con: sqlite3.Connection, items: list[dict[str, Any]],
         else:
             _check_value(con, doc, sel, item, res)
 
-    counts = {s: sum(1 for r in results if r["status"] == s) for s in ("PASS", "FAIL", "COMPUTED")}
-    overall = "FAIL" if counts["FAIL"] or not results else "PASS"
+    counts = {s: sum(1 for r in results if r["status"] == s) for s in ("PASS", "FAIL", "UNCONFIRMED", "COMPUTED")}
+    overall = "FAIL" if counts["FAIL"] or not results else "UNCONFIRMED" if counts["UNCONFIRMED"] else "PASS"
     digest = hashlib.sha256(json.dumps([items, [r["status"] for r in results]], sort_keys=True,
                                        default=str).encode()).hexdigest()[:12]
     return {"overall": overall, "counts": counts, "verification_id": f"v-{digest}", "items": results, "rule": RULE}

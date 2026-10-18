@@ -1,5 +1,7 @@
 {
-  "modules": ["./register.tsx"],
+  "modules": [
+    "./register.tsx"
+  ],
   "hooks": {
     "PreToolUse": [
       {
@@ -8,10 +10,57 @@
           {
             "type": "command",
             "command": "uv",
-            "args": ["run", "--no-project", "--quiet", "--python", ">=3.11", "${CLAUDE_PLUGIN_ROOT}/scripts/webgate.py"],
+            "args": [
+              "run",
+              "--no-project",
+              "--quiet",
+              "--python",
+              ">=3.11",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/webgate.py"
+            ],
             "timeout": 30,
             "onFailure": "block",
             "statusMessage": "ERLA: checking the web request for restricted terms"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "erla:.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "run",
+              "--no-project",
+              "--quiet",
+              "--python",
+              ">=3.11",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/subagent_log.py"
+            ],
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "erla:.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "run",
+              "--no-project",
+              "--quiet",
+              "--python",
+              ">=3.11",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/subagent_log.py"
+            ],
+            "timeout": 15
           }
         ]
       }

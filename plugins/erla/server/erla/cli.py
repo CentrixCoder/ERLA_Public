@@ -112,6 +112,21 @@ def cmd_web_allow(a) -> int:
     return 0
 
 
+def cmd_check_policy(a) -> int:
+    if not a.policy:
+        from .config import check_policy, load_config
+        cfg = load_config(_site(a) / "config" / "library_config.yaml", validate=False)
+        _out(json.dumps({"policy": check_policy(cfg)}))
+        return 0
+    from .site import SiteError, set_check_policy
+    try:
+        res = set_check_policy(_site(a), a.policy, reason=a.reason or "erla check-policy")
+    except SiteError as exc:
+        sys.exit(f"erla check-policy: {exc}")
+    _out(json.dumps(res, indent=2, default=str))
+    return 0
+
+
 def cmd_site(a) -> int:
     from .config import core_dir, protocol_dir
     from .site import review_status
@@ -730,6 +745,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--site")
     s.add_argument("--reason")
     s.set_defaults(fn=cmd_web_allow)
+
+    s = sub.add_parser("check-policy", help="show or set when the Professor checks a Result Packet (ADR-0002)")
+    s.add_argument("policy", nargs="?", choices=["auto", "always", "off"],
+                   help="auto: computed values, discipline work, design values; always; off. No value: show it")
+    s.add_argument("--site")
+    s.add_argument("--reason")
+    s.set_defaults(fn=cmd_check_policy)
 
     s = sub.add_parser("site", help="show site folder, core location, protocol-review status")
     s.add_argument("--site")

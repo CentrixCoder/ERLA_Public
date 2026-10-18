@@ -139,3 +139,12 @@ Read user feedback from log; compute per-doc and per-query-term boosts; propose 
 4. Protocol copies: repo-root protocol files identical to the bundled copies; `site_info.erla_version` equals the release tag.
 **Output:** table — item, location, version, active (yes/no), proposed action (keep / update / stop / delete with approval).
 **Failure:** a source cannot be read (no shell, cloud-only chat) → NOT CHECKED with reason; never infer a version.
+
+## S19. Independent Check (Professor)
+
+**Purpose:** a second, independent look at a draft Result Packet before the user sees it.
+**Who:** the `professor` agent: read-only (library tools, `verify_packet`, `protocol_section`; in the full edition also the calculation tools), no web, no writers, no agents; pinned model (Fable, high effort).
+**When:** the user's check policy (`erla check-policy`; `site_info.check_policy`) or `/erla:check`.
+**How:** W9: a two-part Check Brief, blind estimates before ERLA's values, sources re-opened, sanity checks, S0 checklist, verdict PASS / PASS WITH FINDINGS / FAIL, packet §G.
+**Limits:** an AI check, not a certification (G6.1). Phase 3 of ADR-0002 moves the blind estimate into code.
+**Measured by:** the seeded-error set (catch rate on planted faults, false alarms on correct packets).

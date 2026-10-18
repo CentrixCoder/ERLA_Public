@@ -5,8 +5,8 @@ import type { FileHit, LibraryView, PanelSettings, PanelView, Progress, Source }
 import { explain, MISSING_TOOL, RELOAD_HINT, setupError, setupFrom, splitPaths } from './library'
 import type { AddResult, RemoveResult, SiteInfo, StatusResult } from './library'
 import {
-  askPrompt, CHART_HITS, DEFAULT_SETTINGS, evalFrom, filesFrom, isReranker, openPrompt, parseStats, preferencesSection, qualityLine,
-  readSettings, referencesMarkdown, RERANKER_OPTIONS, rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
+  askPrompt, CHART_HITS, dashboardLink, DEFAULT_SETTINGS, evalFrom, filesFrom, isReranker, openPrompt, parseStats, preferencesSection, qualityLine,
+  checkPolicyLines, readSettings, referencesMarkdown, RERANKER_OPTIONS, rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
 const live = atom({ plugin: 'erla', key: 'live' } as const, null)
@@ -440,7 +440,7 @@ async function refresh($: EngineInterface): Promise<void> {
   try {
     const info = await call<SiteInfo>($, 'site_info')
     const probe = info.library_probe
-    await setPanel($, { configUnits: info.unit_system ?? null, version: info.erla_version ?? null, setup: null })
+    await setPanel($, { configUnits: info.unit_system ?? null, checkPolicy: info.check_policy ?? null, version: info.erla_version ?? null, setup: null })
     await set($, {
       roots: info.library_roots ?? [],
       filesOnDisk: probe?.files_on_disk ?? null,
@@ -532,7 +532,9 @@ function indexNow($: EngineInterface): Promise<void> {
 // in place (library_files, no chat turn); the search toggles (units, semantic search,
 // restricted documents) that the tool.call and prompt.compose hooks above apply; and the
 // documents opened this session with 👍 / 👎 (record_feedback) and Export references
-// (export_packet).
+// (export_packet). An optional KPI dashboard card (off by default; Settings shows it, its Hide
+// hides it) opens the person's own dashboard link in the browser; it calls no ERLA tool, so it
+// works while the server is the install stub or disconnected.
 
 const PANEL_PANE = 'erla-panel'
 const PANEL_TITLE = 'ERLA'
@@ -555,6 +557,7 @@ const PANEL_EMPTY: PanelView = {
   ocrPending: null,
   vectors: null,
   configUnits: null,
+  checkPolicy: null,
   version: null,
   pluginVersion: null,
   setup: null,
@@ -677,6 +680,22 @@ async function changeSettings($: EngineInterface, change: Partial<PanelSettings>
   }
 }
 
+// the KPI dashboard card: the link is the person's own, checked before it is saved (https only)
+async function saveDashboard($: EngineInterface, value: string): Promise<void> {
+  const url = dashboardLink(value)
+  if (!url) {
+    await say($, 'Not saved: paste the dashboard\'s full https:// address.', true)
+    return
+  }
+  await changeSettings($, { dashboardUrl: url })
+  await say($, 'Dashboard link saved: Open KPI dashboard opens it in your browser.')
+}
+
+async function copyDashboard($: EngineInterface, url: string, surface: Parameters<EngineInterface['ui']['copy']>[0]['surface']): Promise<void> {
+  const res = await $.ui.copy({ text: url, surface })
+  await say($, res.isCopied ? 'Dashboard link copied.' : 'Could not copy the link here: select it above instead.', !res.isCopied)
+}
+
 function feedback($: EngineInterface, doc: Source, verdict: 'useful' | 'not_useful'): Promise<void> {
   return panelAct($, 'Saving feedback…', async () => {
     try {
@@ -721,7 +740,7 @@ function registerPanel(on: Parameters<Register>[0]): void {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANEL_PANE }, async ($, e) => {
-    const { Box, Text, Button, Input, Select } = $.ui.resolve(e)
+    const { Box, Text, Button, Input, Select, Link } = $.ui.resolve(e)
     const v = (await read($, panel)) ?? PANEL_EMPTY
     const s = await read($, settings)
     const list = await read($, sources)
@@ -731,7 +750,7 @@ function registerPanel(on: Parameters<Register>[0]): void {
     const quality = qualityLine(v.lastEval)
 
     // theme colors, so the panel reads in light and dark themes alike
-    const ACCENT = { status: 'suggestion', search: 'claude', relevance: 'suggestion', library: 'permission', settings: 'merged', sources: 'success' } as const
+    const ACCENT = { status: 'suggestion', search: 'claude', relevance: 'suggestion', library: 'permission', settings: 'merged', sources: 'success', dashboard: 'claude' } as const
     // one section: a rounded card with a colored title
     const card = (key: string, title: string, color: string, ...body: unknown[]) => (
       <Box key={key} flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} marginBottom={1}>
@@ -789,6 +808,36 @@ function registerPanel(on: Parameters<Register>[0]): void {
             <Button key="status" variant="secondary" onPress={() => void panelAct($, 'Reading ERLA status…', () => refreshStatus($))}>Refresh status</Button>
           </Box>,
         )}
+
+        {s.dashboardShown
+          ? card('dashboard', 'KPI dashboard', ACCENT.dashboard,
+            s.dashboardUrl
+              ? <Text key="dash-open" bold><Link href={s.dashboardUrl}>Open KPI dashboard ↗</Link></Text>
+              : <Text key="dash-none" color="subtle">Paste the https link to your KPI dashboard (for example a claude.ai artifact). It is saved with your panel settings and opens in your browser.</Text>,
+            s.dashboardUrl ? <Text key="dash-url" color="subtle" wrap="truncate-middle">{s.dashboardUrl}</Text> : null,
+            s.dashboardUrl
+              ? null
+              : (
+                <Box key="dash-row" width="100%" flexGrow={1}>
+                  <Input
+                    key="dash-input"
+                    placeholder="https://claude.ai/artifact/…"
+                    submitLabel="save"
+                    onSubmit={value => void saveDashboard($, value)}
+                  />
+                </Box>
+              ),
+            <Box key="dash-actions" gap={1} marginTop={1}>
+              {s.dashboardUrl
+                ? <Button key="dash-copy" variant="secondary" onPress={press => void copyDashboard($, s.dashboardUrl ?? '', press.surface)}>Copy link</Button>
+                : null}
+              {s.dashboardUrl
+                ? <Button key="dash-change" variant="secondary" onPress={() => void changeSettings($, { dashboardUrl: null })}>Change link</Button>
+                : null}
+              <Button key="dash-hide" variant="secondary" onPress={() => void changeSettings($, { dashboardShown: false })}>Hide</Button>
+            </Box>,
+          )
+          : null}
 
         {card('search', 'Search', ACCENT.search,
           <Text key="q-label" color="subtle">Ask a question, or name a topic to list files</Text>,
@@ -929,10 +978,13 @@ function registerPanel(on: Parameters<Register>[0]): void {
             options={RERANKER_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
             onSelect={value => void chooseReranker($, value)}
           />,
+          ...checkPolicyLines(v.checkPolicy).map((line, i) =>
+            <Text key={`check-policy-${i}`} color={i === 0 ? undefined : 'subtle'}>{line}</Text>),
           <Box key="toggles" flexDirection="column" marginTop={1}>
             {toggle('semantic', s.semantic, 'Semantic search', () => void changeSettings($, { semantic: !s.semantic }))}
             {toggle('restricted', s.excludeRestricted, 'Leave out restricted documents (ITAR / EAR / CUI / proprietary)',
               () => void changeSettings($, { excludeRestricted: !s.excludeRestricted }))}
+            {toggle('dashboard', s.dashboardShown, 'Show the KPI dashboard card', () => void changeSettings($, { dashboardShown: !s.dashboardShown }))}
           </Box>,
         )}
 
