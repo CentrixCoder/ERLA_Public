@@ -143,7 +143,7 @@ Read user feedback from log; compute per-doc and per-query-term boosts; propose 
 ## S19. Independent Check (Professor)
 
 **Purpose:** a second, independent look at a draft Result Packet before the user sees it.
-**Who:** the `professor` agent: read-only (library tools, `verify_packet`, `protocol_section`; in the full edition also the calculation tools), no web, no writers, no agents; pinned model (Fable, high effort).
+**Who:** the `professor` agent on Opus 5.5: read-only (library tools, `verify_packet`, `protocol_section`; in the full edition also the calculation tools), no web, no writers, no agents; re-run on Fable only when a check does not converge (W9 step 4a).
 **When:** the user's check policy (`erla check-policy`; `site_info.check_policy`) or `/erla:check`.
 **How:** W9: a two-part Check Brief, blind estimates before ERLA's values, sources re-opened, sanity checks, S0 checklist, verdict PASS / PASS WITH FINDINGS / FAIL, packet §G.
 **Limits:** an AI check, not a certification (G6.1). Phase 3 of ADR-0002 moves the blind estimate into code.

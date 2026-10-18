@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "erla"
-version = "0.5.0"
+version = "0.5.1"
 description = "Engineering Research Library Agent - local engineering library indexer and search"
 requires-python = ">=3.11"
 license = {text = "MIT"}

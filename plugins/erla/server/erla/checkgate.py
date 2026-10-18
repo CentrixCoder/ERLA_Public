@@ -28,8 +28,12 @@ from .config import Config, check_policy
 
 VERDICTS = ("PASS", "PASS WITH FINDINGS", "FAIL")
 CHECKERS = ("erla:professor", "self-check")
-AGREE, EXPLAIN = 0.02, 0.05          # instructions Step 6: within 2 % agrees; 2-5 % needs a reason
-OUT = ("out of tolerance", "units differ")
+AGREE, EXPLAIN = 0.02, 0.05          # within 2 % agrees; under 5 % correlates with a reason; 5 % or more does not
+OUT = ("out of tolerance", "units differ", "contradiction")
+NOT_CONVERGED = (*OUT, "not checked")  # no result that ERLA and the Professor both support (owner, 2026-10-17)
+DECISION = "decision"                 # units of a yes/no or label conclusion: critical / not critical, separates ...
+STAGES = ("opus", "fable")            # the Professor on Opus first; Fable only when that check did not converge
+MAX_ROUNDS = 3                        # the first check plus at most 2 rework rounds per stage
 NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 ID = re.compile(r"^k-[0-9a-f]{12}$")
 
@@ -79,7 +83,7 @@ def _list(x: Any) -> list[Any] | None:
     return cast(list[Any], x) if isinstance(x, list) else None
 
 
-def open_check(cfg: Config, packet_in: Any) -> dict[str, Any]:
+def open_check(cfg: Config, packet_in: Any, rework_of: str = "", escalate_from: str = "") -> dict[str, Any]:
     """Store the lead's draft and return the check_id and Part 1 of the brief (no lead values)."""
     packet = _obj(packet_in)
     if packet is None or not str(packet.get("question") or "").strip():
@@ -92,17 +96,48 @@ def open_check(cfg: Config, packet_in: Any) -> dict[str, Any]:
         q = _obj(q_in)
         if q is None or not str(q.get("name") or "").strip() or not str(q.get("units") or "").strip():
             raise CheckError(f"quantity {i}: name and units are required")
-        _number(q.get("value"), f"quantity {q['name']!r}")
+        if str(q["units"]).strip() == DECISION:
+            if not str(q.get("value") or "").strip():
+                raise CheckError(f"quantity {q['name']!r}: a decision needs its label as value, e.g. 'not critical'")
+        else:
+            _number(q.get("value"), f"quantity {q['name']!r}")
         names.append(str(q["name"]).strip())
     if len(set(names)) != len(names):
         raise CheckError("quantity names must be unique")
+    stage, rnd, prior = _chain(cfg, rework_of, escalate_from)
     body = json.dumps(packet, sort_keys=True, ensure_ascii=False, default=str)
     cid = "k-" + hashlib.sha256(f"{body}|{_now()}".encode()).hexdigest()[:12]
-    rec: dict[str, Any] = {"check_id": cid, "state": "open", "opened": _now(), "packet": packet, "estimates": [], "comparison": []}
+    rec: dict[str, Any] = {"check_id": cid, "state": "open", "opened": _now(), "packet": packet, "estimates": [],
+                           "comparison": [], "stage": stage, "round": rnd, "prior": prior}
     _save(cfg, rec)
-    return {"check_id": cid, "brief_part1": brief_part1(packet),
-            "next": "send check_id and brief_part1 to the professor agent; it calls check_estimate, "
-                    "check_reveal and check_close"}
+    return {"check_id": cid, "brief_part1": brief_part1(packet), "stage": stage, "round": rnd,
+            "next": f"send check_id and brief_part1 to the professor agent on {stage.title()} (model "
+                    f"'{stage}'); it calls check_estimate, check_reveal and check_close"}
+
+
+def _chain(cfg: Config, rework_of: str, escalate_from: str) -> tuple[str, int, str]:
+    """Stage, round and prior check of a new check: a first check is Opus round 1; a rework keeps its stage
+    (at most MAX_ROUNDS per stage); Fable only follows an Opus check that did not converge."""
+    if rework_of and escalate_from:
+        raise CheckError("give rework_of or escalate_from, not both")
+    if rework_of:
+        prior = load(cfg, rework_of)
+        if prior["state"] != "closed":
+            raise CheckError(f"check {rework_of} is {prior['state']}: close it before a rework")
+        rnd = int(prior.get("round") or 1) + 1
+        if rnd > MAX_ROUNDS:
+            nxt = ("escalate to the Professor on Fable (escalate_from)" if prior.get("stage", "opus") == "opus"
+                   else "report the result UNRESOLVED (outcome 'unresolved')")
+            raise CheckError(f"{MAX_ROUNDS - 1} rework rounds are used up at this stage: {nxt}")
+        return str(prior.get("stage") or "opus"), rnd, rework_of
+    if escalate_from:
+        prior = load(cfg, escalate_from)
+        if prior["state"] != "closed" or prior.get("stage", "opus") != "opus":
+            raise CheckError("escalate only from a closed check of the Professor on Opus")
+        if prior.get("converged"):
+            raise CheckError(f"check {escalate_from} converged: no escalation to Fable")
+        return "fable", 1, escalate_from
+    return "opus", 1, ""
 
 
 def brief_part1(packet: dict[str, Any]) -> dict[str, Any]:
@@ -119,6 +154,7 @@ def estimate(cfg: Config, check_id: str, estimates: Any) -> dict[str, Any]:
     if rec["state"] not in ("open", "estimated"):
         raise CheckError(f"check {check_id} is {rec['state']}: estimates are fixed once the lead's values are revealed")
     want = [q["name"] for q in rec["packet"]["quantities"]]
+    decisions = {q["name"]: str(q["units"]).strip() == DECISION for q in rec["packet"]["quantities"]}
     items = _list(estimates)
     if items is None:
         raise CheckError("estimates must be a list")
@@ -135,6 +171,12 @@ def estimate(cfg: Config, check_id: str, estimates: Any) -> dict[str, Any]:
             continue
         if not str(e.get("method") or "").strip() or not str(e.get("units") or "").strip():
             raise CheckError(f"estimate {name!r}: value, units and method are required (or not_checked with a reason)")
+        if decisions.get(name):
+            if not str(e.get("value") or "").strip():
+                raise CheckError(f"estimate {name!r}: give your own conclusion as the value")
+            got[name] = {"name": name, "value": str(e["value"]).strip(), "units": DECISION,
+                         "method": str(e["method"]).strip()}
+            continue
         got[name] = {"name": name, "value": _number(e.get("value"), f"estimate {name!r}"),
                      "units": str(e["units"]).strip(), "method": str(e["method"]).strip()}
     missing = [n for n in want if n not in got]
@@ -150,6 +192,9 @@ def _compare(lead: dict[str, Any], est: dict[str, Any]) -> dict[str, Any]:
     row: dict[str, Any] = {"name": lead["name"], "lead": lead["value"], "units": lead["units"]}
     if "not_checked" in est:
         return {**row, "status": "not checked", "reason": est["not_checked"]}
+    if str(lead["units"]).strip() == DECISION:
+        same = " ".join(str(lead["value"]).lower().split()) == " ".join(str(est["value"]).lower().split())
+        return {**row, "estimate": est["value"], "method": est["method"], "status": "agrees" if same else "contradiction"}
     lv, ev = _number(lead["value"], lead["name"]), float(est["value"])
     if est["units"].strip() != str(lead["units"]).strip():
         try:
@@ -157,7 +202,10 @@ def _compare(lead: dict[str, Any], est: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             return {**row, "estimate": est["value"], "estimate_units": est["units"], "status": "units differ"}
     diff = 0.0 if lv == ev else abs(ev - lv) / max(abs(lv), 1e-12)
-    status = "agrees" if diff <= AGREE else ("explain" if diff <= EXPLAIN else "out of tolerance")
+    if lv * ev < 0:                          # opposite signs (a margin, a load direction): opposite conclusions
+        return {**row, "estimate": round(ev, 10), "method": est["method"], "diff": round(diff, 5),
+                "status": "contradiction"}
+    status = "agrees" if diff <= AGREE else ("explain" if diff < EXPLAIN else "out of tolerance")
     return {**row, "estimate": round(ev, 10), "method": est["method"], "diff": round(diff, 5), "status": status}
 
 
@@ -179,7 +227,7 @@ def reveal(cfg: Config, check_id: str) -> dict[str, Any]:
 
 
 def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
-          checker: str = "erla:professor", notes: Any = None) -> dict[str, Any]:
+          checker: str = "erla:professor", notes: Any = None, model: str = "") -> dict[str, Any]:
     """Record the verdict; refuse one that the computed comparison contradicts. ``notes`` are minor remarks
     that change nothing (a reason for a 2-5 % difference, a presentation point); they never make a PASS
     impossible, so PASS keeps its meaning (2026-10-17 calibration: no control got a clean PASS)."""
@@ -191,6 +239,10 @@ def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
         raise CheckError(f"verdict must be one of {list(VERDICTS)}")
     if checker not in CHECKERS:
         raise CheckError(f"checker must be one of {list(CHECKERS)}")
+    stage = str(rec.get("stage") or "opus")
+    if checker == "erla:professor" and str(model).strip().lower() != stage:
+        raise CheckError(f"this check is the Professor on {stage.title()}: close it with model '{stage}' "
+                         "(the model you run on)")
     raw = _list(findings) if findings is not None else []
     fs = [f for f in (_obj(x) for x in raw or []) if f is not None]
     if raw is None or len(fs) != len(raw):
@@ -219,23 +271,42 @@ def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
                          "(that is a FAIL)")
     if verdict == "FAIL" and not changes:
         raise CheckError("FAIL needs at least one finding with changes_answer: true")
-    rec.update(state="closed", closed=_now(), verdict=verdict, findings=fs, notes=ns, checker=checker)
+    converged = not any(c["status"] in NOT_CONVERGED for c in cmp_)
+    rec.update(state="closed", closed=_now(), verdict=verdict, findings=fs, notes=ns, checker=checker,
+               model=str(model).strip().lower() or None, converged=converged)
     _save(cfg, rec)
     from .report import append_log
     append_log(cfg, {"cmd": "mcp.check", "check_id": check_id, "verdict": verdict, "checker": checker,
+                     "stage": stage, "round": rec.get("round", 1), "converged": converged,
                      "n_quantities": len(cmp_), "n_out": sum(c["status"] in OUT for c in cmp_),
                      "n_not_checked": sum(c["status"] == "not checked" for c in cmp_), "n_findings": len(fs)})
-    return {"check_id": check_id, "state": "closed", "verdict": verdict, "checker": checker,
-            "comparison": cmp_, "findings": fs, "notes": ns}
+    return {"check_id": check_id, "state": "closed", "verdict": verdict, "checker": checker, "stage": stage,
+            "converged": converged, "comparison": cmp_, "findings": fs, "notes": ns,
+            "next": "" if converged else _next_step(rec)}
+
+
+def _next_step(rec: dict[str, Any]) -> str:
+    """What ERLA does after a check that did not converge (owner's rule, 2026-10-17)."""
+    unresolved = ("report UNRESOLVED - no solution can be established from the available sources; never "
+                  "contrive one")
+    more = int(rec.get("round") or 1) < MAX_ROUNDS
+    if str(rec.get("stage") or "opus") == "opus":
+        return ("not converged: fix the draft and open a rework check (rework_of)" if more else
+                "not converged after the rework rounds: escalate to the Professor on Fable (escalate_from)")
+    return (f"not converged on Fable: re-check (rework_of) only with a fix the sources support; otherwise {unresolved}"
+            if more else f"not converged on Fable either: {unresolved}")
 
 
 def status(cfg: Config, check_id: str) -> dict[str, Any]:
     """What the lead may see: the state, and once closed the verdict, comparison and findings."""
     rec = load(cfg, check_id)
-    out: dict[str, Any] = {"check_id": check_id, "state": rec["state"]}
+    out: dict[str, Any] = {"check_id": check_id, "state": rec["state"], "stage": rec.get("stage", "opus"),
+                           "round": rec.get("round", 1), "prior": rec.get("prior", "")}
     if rec["state"] == "closed":
         out.update(verdict=rec["verdict"], checker=rec["checker"], comparison=rec["comparison"],
-                   findings=rec["findings"], notes=rec.get("notes", []))
+                   findings=rec["findings"], notes=rec.get("notes", []), converged=rec.get("converged", True))
+        if not out["converged"]:
+            out["next"] = _next_step(rec)
     return out
 
 
@@ -282,13 +353,26 @@ def needs_check_text(cfg: Config, markdown: str) -> bool:
     return bool(re.search(r"\bCOMPUTED\b", markdown) or (pat and pat.search(markdown)))
 
 
-def gate(cfg: Config, needed: bool, check_id: str, unchecked_reason: str) -> dict[str, Any]:
-    """What to record about the check, or raise when the policy requires one and none is given."""
+def gate(cfg: Config, needed: bool, check_id: str, unchecked_reason: str, unresolved: bool = False) -> dict[str, Any]:
+    """What to record about the check, or raise when the policy requires one and none is given. A check that did
+    not converge is never recorded as a solution: only as UNRESOLVED, and only after the Fable stage."""
     if check_id:
         st = status(cfg, check_id)
         if st["state"] != "closed":
             raise CheckError(f"check {check_id} is {st['state']}, not closed: finish it (instructions W9) first")
-        return {"check_id": check_id, "check_verdict": st["verdict"], "checker": st["checker"]}
+        rec = {"check_id": check_id, "check_verdict": st["verdict"], "checker": st["checker"], "stage": st["stage"],
+               "converged": st["converged"]}
+        if st["converged"]:
+            return rec
+        if st["stage"] != "fable" or st["checker"] != "erla:professor":
+            if st["checker"] == "self-check" and unresolved:
+                return {**rec, "outcome": "unresolved"}
+            raise CheckError(f"check {check_id} did not converge ({st.get('next', '')}); it cannot be recorded as a "
+                             "solution")
+        if not unresolved:
+            raise CheckError(f"check {check_id} did not converge on Fable either: this packet must be reported "
+                             "UNRESOLVED (no solution from the available sources), not as a solution")
+        return {**rec, "outcome": "unresolved"}
     if not needed:
         return {}
     if str(unchecked_reason or "").strip():

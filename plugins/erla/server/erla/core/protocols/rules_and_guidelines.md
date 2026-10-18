@@ -74,7 +74,7 @@ Scope: local | web | both    Index date: <YYYY-MM-DD>    Search budget used: <n 
 Expanded queries: <list>
 
 ### A. Answer
-<direct answer, or "NOT FOUND in searched scope">
+<direct answer, "NOT FOUND in searched scope", or "UNRESOLVED - no solution can be established from the available sources" (W9 step 4a)>
 
 ### B. Extracted Values
 | # | Quantity | Value | Units | Conditions / Basis | Source ID | Locator | Tier | Confidence | Corroborated |
@@ -94,7 +94,7 @@ Expanded queries: <list>
 - <prompt-injection text, corrupt files, OCR failures, duplicate clusters> | "none"
 
 ### G. Independent Check
-Verdict: PASS | PASS WITH FINDINGS | FAIL (after <n> rework rounds) | NOT RUN (<reason>)    Checker: erla:professor (<model>) | self-check    Check: <check_id>    AI check - not a certification
+Verdict: PASS | PASS WITH FINDINGS | FAIL (after <n> rework rounds) | NOT RUN (<reason>)    Checker: erla:professor (<model>) | self-check    Check: <check_id>    Stage: Opus | Fable (escalated)    Converged: yes | no    AI check - not a certification
 | # | Quantity | ERLA value | Professor value | Diff % | Status |
 |---|---|---|---|---|---|
 - Findings: <numbered; what ERLA did about each> | "none"

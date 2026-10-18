@@ -126,5 +126,9 @@ Run after every ERLA release, when Step 0.4 finds drift, or when the user asks.
    - FAIL: fix and open a new check, at most 2 rework rounds; otherwise report each unresolved finding in §G and §E.
    - PASS WITH FINDINGS: address or report each finding.
    - Findings ERLA cannot resolve, and design or certification decisions, go to the user (L13).
+4a. Convergence: ERLA and the Professor converge when every quantity is below 5% apart with the same sign, every decision agrees, and nothing is left not checked; `check_close` returns `converged`. If not:
+   - fix the draft only where the sources support the fix, and re-check (`check_open` with `rework_of`, at most 2 rework rounds);
+   - then re-check once more with the Professor on **Fable** (`check_open` with `escalate_from`, and the Agent tool with model `fable`);
+   - if that does not converge either, stop. §A reads "UNRESOLVED - no solution can be established from the available sources"; show both results, the disparity and what source or input is missing; log with `outcome: "unresolved"`. Never contrive a solution (G3.7).
 5. Result Packet §G from `check_status` (verdict, comparison table, findings) with the `check_id`. Pass the `check_id` to `log_request` and `export_packet`. If no check could run, pass `unchecked_reason` instead: both tools refuse a packet the policy requires to be checked without one. Lessons the Professor proposes: record the ones ERLA accepts with `record_lesson`, where installed.
 6. No Agent tool (e.g. a chat without sub-agents): run steps 2–3 yourself with the same tools, close with `checker: "self-check"`, and label §G "self-check (no independent agent available)". Never omit §G when the policy requires it.

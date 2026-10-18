@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.5.1-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,17 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.5.1
+
+In short: ERLA never forces an answer.
+- **When ERLA and its checker disagree.** The Professor now runs on Claude Opus 5.5. If its result and
+  ERLA's still differ by 5% or more, or reach opposite conclusions, after ERLA has fixed what the sources
+  support, the check is repeated once on Claude Fable. If they still do not agree, ERLA stops and answers
+  "UNRESOLVED - no solution can be established from the available sources", with both results and what
+  is missing. Such an answer cannot be logged or exported as a solution.
+- **New rule G3.7:** neither ERLA nor its checker ever produces, adjusts or chooses a value or conclusion
+  to satisfy a request or to make two results agree.
+
 ### 0.5.0
 
 In short: an independent checker now vets ERLA's computed and design answers before you see them.
@@ -42,17 +53,6 @@ In short: right after an install or update, the control panel tells you what to 
   progress and a **Check again** button, and the title shows the plugin's version. Before, every button
   showed a "no connected MCP tool" error. After an update, quit and reopen the Claude app to restart a
   server that was already running.
-
-### 0.4.1
-
-In short: the control panel now shows how well each source matches your question.
-- **Relevance chart.** After ERLA searches your library, the control panel's new "Relevance: last search"
-  card lists the top 10 sources with a bar for how well each matches the question, colored by source
-  authority, with a warning mark on restricted documents. When a search ran without the re-ranker, the
-  card says so instead of drawing bars. The bar is about matching the question, not about whether a value
-  is right: ERLA still checks every value against its source.
-- **Search quality.** The Status card shows ERLA's score on your own test questions (nDCG@10) from the last
-  `erla eval` run, or "not measured yet", and warns when there are too few questions (under 30) to rely on.
 
 <!-- release-notes:end -->
 

@@ -642,17 +642,17 @@ def t_log_request(record: dict) -> dict:
     cfg = _cfg()
     try:                     # the user's check policy (ADR-0002 Phase 3): no check, no log - fail closed
         check = checkgate.gate(cfg, checkgate.needs_check_record(cfg, record), str(record.get("check_id") or ""),
-                               str(record.get("unchecked_reason") or ""))
+                               str(record.get("unchecked_reason") or ""), record.get("outcome") == "unresolved")
     except checkgate.CheckError as exc:
         return {"error": str(exc), "check_policy": check_policy(cfg)}
     rec = {"cmd": "agent", **record, "verified": verified, **check}   # check fields come from the record on disk
     return {"logged_to": str(append_log(cfg, rec)), **check}
 
 
-def t_check_open(packet: dict) -> dict:
+def t_check_open(packet: dict, rework_of: str = "", escalate_from: str = "") -> dict:
     from . import checkgate
     try:
-        return checkgate.open_check(_cfg(), packet)
+        return checkgate.open_check(_cfg(), packet, rework_of, escalate_from)
     except checkgate.CheckError as exc:
         return {"error": str(exc)}
 
@@ -674,10 +674,10 @@ def t_check_reveal(check_id: str) -> dict:
 
 
 def t_check_close(check_id: str, verdict: str, findings: list[dict] | None = None,
-                  checker: str = "erla:professor", notes: list[dict] | None = None) -> dict:
+                  checker: str = "erla:professor", notes: list[dict] | None = None, model: str = "") -> dict:
     from . import checkgate
     try:
-        return checkgate.close(_cfg(), check_id, verdict, findings, checker, notes)
+        return checkgate.close(_cfg(), check_id, verdict, findings, checker, notes, model)
     except checkgate.CheckError as exc:
         return {"error": str(exc)}
 
@@ -708,7 +708,8 @@ def t_export_packet(name: str, markdown: str, csv_text: str = "", check_id: str 
     from . import checkgate
     cfg = _cfg()
     try:                     # same policy gate as log_request (ADR-0002 Phase 3)
-        check = checkgate.gate(cfg, checkgate.needs_check_text(cfg, markdown), check_id, unchecked_reason)
+        check = checkgate.gate(cfg, checkgate.needs_check_text(cfg, markdown), check_id, unchecked_reason,
+                               "UNRESOLVED" in markdown)
     except checkgate.CheckError as exc:
         return {"error": str(exc), "check_policy": check_policy(cfg)}
     stem = SAFE_NAME.sub("_", name).strip("._")[:80] or "result_packet"
@@ -922,8 +923,10 @@ def build_server():
         "skills_loaded, calc_ids, design_value.", wr)
     reg(t_check_open, "check_open", "Lead only (instructions W9): open an independent check of a draft "
         "packet - {question, inputs, sources, method, discipline, quantities: [{name, value, units, calc_id, "
-        "source}], assumptions, conclusion}. Returns check_id and brief_part1 (no values) for the professor "
-        "agent.", wr)
+        "source}], assumptions, conclusion}; a conclusion to compare (critical / not critical, separates / does "
+        "not) is a quantity with units 'decision' and its label as value. rework_of: the closed check this "
+        "reworks (at most 2 rework rounds per stage); escalate_from: a closed Opus check that did not converge "
+        "(the next check is the Professor on Fable). Returns check_id, stage and brief_part1 (no values).", wr)
     reg(t_check_status, "check_status", "State of an independent check; once closed, its verdict, the "
         "computed comparison and the findings (for Result Packet section G).", ro)
     reg(t_check_estimate, "check_estimate", "Professor only: record your own estimate of every quantity "
@@ -937,7 +940,9 @@ def build_server():
         "in notes [{quantity, note}]. Refused when it contradicts the comparison: PASS needs every quantity "
         "checked and within tolerance and no findings; a 2-5 % difference needs a note or finding with the "
         "reason; each quantity out of tolerance needs a finding; FAIL needs a finding that changes the "
-        "answer. checker: erla:professor or self-check.", wr)
+        "answer. checker: erla:professor or self-check; model: the model you run on (opus or fable), which must "
+        "match the check's stage. Returns converged: false when ERLA and you do not correlate (5 % or more, "
+        "opposite signs or conclusions, or not checked) and the next step.", wr)
     reg(t_record_feedback, "record_feedback", "Record user feedback on a source: verdict 'useful' or "
         "'not_useful' (rules R7.2).", wr)
     reg_if(SPECIALISTS, t_record_lesson, "record_lesson", "Lead agent only: record a specialist lesson - kind "
