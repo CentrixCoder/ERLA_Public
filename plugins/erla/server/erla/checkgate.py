@@ -34,6 +34,13 @@ NOT_CONVERGED = (*OUT, "not checked")  # no result that ERLA and the Professor b
 DECISION = "decision"                 # units of a yes/no or label conclusion: critical / not critical, separates ...
 STAGES = ("opus", "fable")            # the Professor on Opus first; Fable only when that check did not converge
 MAX_ROUNDS = 3                        # the first check plus at most 2 rework rounds per stage
+# Model currency (0.5.2): the Professor's agent file names model families (aliases), which Claude Code resolves to
+# the newest model of each family. Every check records the exact model it ran on; a model without a passing
+# calibration on the seeded-error set is flagged until professor_eval has measured it.
+MODEL_ID = re.compile(r"^claude-[a-z]+(?:-[a-z0-9]+)*$")
+CATCH_TARGET, FALSE_ALARM_MAX = 0.90, 0.10
+CAL_MIN_FAULTY, CAL_MIN_CONTROLS = 10, 5
+CALIBRATION_LOG = "professor_calibration.jsonl"
 NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 ID = re.compile(r"^k-[0-9a-f]{12}$")
 
@@ -227,7 +234,8 @@ def reveal(cfg: Config, check_id: str) -> dict[str, Any]:
 
 
 def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
-          checker: str = "erla:professor", notes: Any = None, model: str = "") -> dict[str, Any]:
+          checker: str = "erla:professor", notes: Any = None, model: str = "",
+          model_id: str = "") -> dict[str, Any]:
     """Record the verdict; refuse one that the computed comparison contradicts. ``notes`` are minor remarks
     that change nothing (a reason for a 2-5 % difference, a presentation point); they never make a PASS
     impossible, so PASS keeps its meaning (2026-10-17 calibration: no control got a clean PASS)."""
@@ -243,6 +251,10 @@ def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
     if checker == "erla:professor" and str(model).strip().lower() != stage:
         raise CheckError(f"this check is the Professor on {stage.title()}: close it with model '{stage}' "
                          "(the model you run on)")
+    mid = str(model_id).strip().lower()
+    if checker == "erla:professor" and (not MODEL_ID.match(mid) or stage not in mid.split("-")):
+        raise CheckError(f"close with model_id = the exact model you run on, of the {stage.title()} family "
+                         f"(e.g. 'claude-{stage}-5-5'); got {model_id!r}")
     raw = _list(findings) if findings is not None else []
     fs = [f for f in (_obj(x) for x in raw or []) if f is not None]
     if raw is None or len(fs) != len(raw):
@@ -272,17 +284,69 @@ def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
     if verdict == "FAIL" and not changes:
         raise CheckError("FAIL needs at least one finding with changes_answer: true")
     converged = not any(c["status"] in NOT_CONVERGED for c in cmp_)
+    calibrated = None if checker != "erla:professor" else mid in calibrated_models(cfg)
     rec.update(state="closed", closed=_now(), verdict=verdict, findings=fs, notes=ns, checker=checker,
-               model=str(model).strip().lower() or None, converged=converged)
+               model=str(model).strip().lower() or None, model_id=mid or None, calibrated=calibrated,
+               converged=converged)
     _save(cfg, rec)
     from .report import append_log
+    if calibrated is False:
+        _open_model_trigger(cfg, mid)
     append_log(cfg, {"cmd": "mcp.check", "check_id": check_id, "verdict": verdict, "checker": checker,
                      "stage": stage, "round": rec.get("round", 1), "converged": converged,
+                     "model_id": mid or None, "calibrated": calibrated,
                      "n_quantities": len(cmp_), "n_out": sum(c["status"] in OUT for c in cmp_),
                      "n_not_checked": sum(c["status"] == "not checked" for c in cmp_), "n_findings": len(fs)})
     return {"check_id": check_id, "state": "closed", "verdict": verdict, "checker": checker, "stage": stage,
+            "model_id": mid or None, "calibrated": calibrated,
+            **({"calibration_note": f"checker model {mid} not yet calibrated: re-run scripts/professor_eval.py"}
+               if calibrated is False else {}),
             "converged": converged, "comparison": cmp_, "findings": fs, "notes": ns,
             "next": "" if converged else _next_step(rec)}
+
+
+def calibrated_models(cfg: Config) -> set[str]:
+    """Model IDs whose latest calibration on the seeded-error set passed both targets."""
+    p = cfg.log_dir / CALIBRATION_LOG
+    latest: dict[str, bool] = {}
+    if p.is_file():
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                r = _obj(json.loads(line))
+            except ValueError:
+                continue
+            if r is not None and r.get("model_id"):
+                latest[str(r["model_id"])] = bool(r.get("passed"))
+    return {m for m, ok in latest.items() if ok}
+
+
+def record_calibration(cfg: Config, model_id: str, summary: dict[str, Any], source: str = "") -> dict[str, Any]:
+    """Append one calibration result. It passes only on a full set (at least CAL_MIN_FAULTY faulty and
+    CAL_MIN_CONTROLS correct packets) that meets both targets: a smoke run never calibrates a model."""
+    mid = str(model_id).strip().lower()
+    if not MODEL_ID.match(mid):
+        raise CheckError(f"calibration needs an exact model id, got {model_id!r}")
+    faulty, controls = int(summary.get("faulty") or 0), int(summary.get("controls") or 0)
+    catch = summary.get("catch_rate")
+    false_alarm = summary.get("false_alarm_rate")
+    passed = (faulty >= CAL_MIN_FAULTY and controls >= CAL_MIN_CONTROLS and catch is not None
+              and false_alarm is not None and float(catch) >= CATCH_TARGET and float(false_alarm) <= FALSE_ALARM_MAX)
+    rec = {"ts": _now(), "model_id": mid, "faulty": faulty, "controls": controls, "catch_rate": catch,
+           "false_alarm_rate": false_alarm, "targets": {"catch": CATCH_TARGET, "false_alarm": FALSE_ALARM_MAX},
+           "passed": passed, "source": source}
+    safeio.append_jsonl(cfg, cfg.log_dir / CALIBRATION_LOG, rec)
+    return rec
+
+
+def _open_model_trigger(cfg: Config, model_id: str) -> None:
+    """One protocol-review trigger per uncalibrated checker model (shown by site_info / protocol_status)."""
+    p = cfg.log_dir / "protocol_review_log.jsonl"
+    if p.is_file() and f'"model_id": "{model_id}"' in p.read_text(encoding="utf-8", errors="replace"):
+        return
+    safeio.append_jsonl(cfg, p, {"ts": _now(), "type": "trigger_open", "trigger": "model_change",
+                                 "model_id": model_id,
+                                 "detail": f"the Professor ran on {model_id}, which has no passing calibration; "
+                                           "run scripts/professor_eval.py on the seeded-error set"})
 
 
 def _next_step(rec: dict[str, Any]) -> str:
@@ -304,7 +368,8 @@ def status(cfg: Config, check_id: str) -> dict[str, Any]:
                            "round": rec.get("round", 1), "prior": rec.get("prior", "")}
     if rec["state"] == "closed":
         out.update(verdict=rec["verdict"], checker=rec["checker"], comparison=rec["comparison"],
-                   findings=rec["findings"], notes=rec.get("notes", []), converged=rec.get("converged", True))
+                   findings=rec["findings"], notes=rec.get("notes", []), converged=rec.get("converged", True),
+                   model_id=rec.get("model_id"), calibrated=rec.get("calibrated"))
         if not out["converged"]:
             out["next"] = _next_step(rec)
     return out
@@ -361,7 +426,7 @@ def gate(cfg: Config, needed: bool, check_id: str, unchecked_reason: str, unreso
         if st["state"] != "closed":
             raise CheckError(f"check {check_id} is {st['state']}, not closed: finish it (instructions W9) first")
         rec = {"check_id": check_id, "check_verdict": st["verdict"], "checker": st["checker"], "stage": st["stage"],
-               "converged": st["converged"]}
+               "converged": st["converged"], "model_id": st.get("model_id"), "calibrated": st.get("calibrated")}
         if st["converged"]:
             return rec
         if st["stage"] != "fable" or st["checker"] != "erla:professor":

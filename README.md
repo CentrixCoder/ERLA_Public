@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.1-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.5.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,15 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.5.2
+
+In short: ERLA's checker keeps up with new Claude models, and tells you when it has not been re-measured.
+- **Newest models.** The Professor follows the newest Claude Opus model, and Fable for its last-resort
+  re-check, without an ERLA update.
+- **Measured before trusted.** Every check records the exact model it ran on. Until that model has passed
+  ERLA's checker test (at least 90% of planted errors caught, at most 10% false alarms), the answer's
+  section G says "checker model not yet calibrated" and ERLA's protocol status lists it.
+
 ### 0.5.1
 
 In short: ERLA never forces an answer.
@@ -43,16 +52,6 @@ In short: an independent checker now vets ERLA's computed and design answers bef
   shows the current choice. `/erla:check` checks any answer, or your own hand calculation, on request.
 - **Sharper value checks.** A table value is confirmed in its row and column, or reported as
   unconfirmed; an honest "not found" answer is no longer logged as unverified.
-
-### 0.4.2
-
-In short: right after an install or update, the control panel tells you what to do instead of showing errors.
-- **No reconnect after an install.** When ERLA's runtime finishes installing, its library tools appear in
-  the same session by themselves.
-- **Setup card.** While the runtime installs, the control panel shows a "Setup" card with the install
-  progress and a **Check again** button, and the title shows the plugin's version. Before, every button
-  showed a "no connected MCP tool" error. After an update, quit and reopen the Claude app to restart a
-  server that was already running.
 
 <!-- release-notes:end -->
 

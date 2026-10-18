@@ -94,7 +94,7 @@ Expanded queries: <list>
 - <prompt-injection text, corrupt files, OCR failures, duplicate clusters> | "none"
 
 ### G. Independent Check
-Verdict: PASS | PASS WITH FINDINGS | FAIL (after <n> rework rounds) | NOT RUN (<reason>)    Checker: erla:professor (<model>) | self-check    Check: <check_id>    Stage: Opus | Fable (escalated)    Converged: yes | no    AI check - not a certification
+Verdict: PASS | PASS WITH FINDINGS | FAIL (after <n> rework rounds) | NOT RUN (<reason>)    Checker: erla:professor (<model>) | self-check    Check: <check_id>    Stage: Opus | Fable (escalated)    Converged: yes | no    Calibrated: yes | no (re-run professor_eval)    AI check - not a certification
 | # | Quantity | ERLA value | Professor value | Diff % | Status |
 |---|---|---|---|---|---|
 - Findings: <numbered; what ERLA did about each> | "none"

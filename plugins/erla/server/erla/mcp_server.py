@@ -80,6 +80,15 @@ def _cfg():
     return load_config()
 
 
+def _calibrated() -> list[str]:
+    """Checker models with a passing calibration (0.5.2); empty when no site is configured yet."""
+    try:
+        from .checkgate import calibrated_models
+        return sorted(calibrated_models(load_config(validate=False)))
+    except (ConfigError, OSError):
+        return []
+
+
 def _check_policy() -> str:
     """The site's check policy for site_info; 'auto' (never 'off') when no site is configured yet."""
     try:
@@ -211,7 +220,8 @@ def t_site_info() -> dict:
                             # kept for older protocol text: now the discipline skill, no worker agent (ADR-0002)
                             "specialists": {k: f"erla:{s['skill']}" for k, s in installed().items()},
                             "disciplines": disciplines_info(),       # discipline skills (ADR-0002)
-                            "check_policy": _check_policy()}         # when erla:professor vets a packet (user's)
+                            "check_policy": _check_policy(),         # when erla:professor vets a packet (user's)
+                            "professor_calibrated_models": _calibrated()}
     if not info["specialists"]:
         info["edition"] = ("core: no specialist agents installed; do discipline work as the lead agent and say "
                            "no specialist reviewed it")
@@ -674,10 +684,11 @@ def t_check_reveal(check_id: str) -> dict:
 
 
 def t_check_close(check_id: str, verdict: str, findings: list[dict] | None = None,
-                  checker: str = "erla:professor", notes: list[dict] | None = None, model: str = "") -> dict:
+                  checker: str = "erla:professor", notes: list[dict] | None = None, model: str = "",
+                  model_id: str = "") -> dict:
     from . import checkgate
     try:
-        return checkgate.close(_cfg(), check_id, verdict, findings, checker, notes, model)
+        return checkgate.close(_cfg(), check_id, verdict, findings, checker, notes, model, model_id)
     except checkgate.CheckError as exc:
         return {"error": str(exc)}
 
@@ -941,7 +952,8 @@ def build_server():
         "checked and within tolerance and no findings; a 2-5 % difference needs a note or finding with the "
         "reason; each quantity out of tolerance needs a finding; FAIL needs a finding that changes the "
         "answer. checker: erla:professor or self-check; model: the model you run on (opus or fable), which must "
-        "match the check's stage. Returns converged: false when ERLA and you do not correlate (5 % or more, "
+        "match the check's stage; model_id: your exact model id (e.g. claude-opus-5-5), recorded and compared with "
+        "the calibrated models. Returns calibrated, and converged: false when ERLA and you do not correlate (5 % or more, "
         "opposite signs or conclusions, or not checked) and the next step.", wr)
     reg(t_record_feedback, "record_feedback", "Record user feedback on a source: verdict 'useful' or "
         "'not_useful' (rules R7.2).", wr)

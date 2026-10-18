@@ -124,6 +124,7 @@ Read user feedback from log; compute per-doc and per-query-term boosts; propose 
 6. Performance feedback — eval metrics vs previous review; recurring corrections, `not_useful` sources, and NOT FOUND gaps mapped to rule, synonym, or tier changes.
 7. Platform alignment — CLOUD_MODE procedure, Claude/Desktop Commander tool names, and `.claude/agents/erla.md` + `.claude/commands/find.md` still match how the agent is actually run. One install source, local and cloud copies at the same version, no stale runtimes or jobs (S18, G10).
 8. Obsolescence — remove or mark rules that no longer apply; flag duplicated rules for consolidation.
+9. Model currency — the Professor's model aliases (`opus`, `fable`) still name the newest model families on Anthropic's model list; a new family that replaces one is proposed for an ERLA release; the model the checks run on (`check_status` `model_id`) has a passing calibration in `logs/professor_calibration.jsonl`, or `scripts/professor_eval.py` is run on the seeded-error set (open `model_change` triggers).
 **Output:** `out/protocol_review_<YYYY-MM-DD>.md` (findings + proposed diffs); after approval, updated files, `PROTOCOL_REVIEW.md` entry, `logs/protocol_review_log.jsonl` line.
 **Failure:** if a check cannot run (e.g., eval harness broken, the site computer unreachable), record the check as `NOT RUN` with reason; the review is then `PARTIAL`, and the next scheduled date is not advanced until the missing checks are completed.
 
