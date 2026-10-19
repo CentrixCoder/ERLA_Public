@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import {
-  artifactsFrom, askPrompt, checkPolicyLines, dashboardLink, onlyDashboard, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
+  artifactsFrom, askPrompt, buttonLook, CARD_COLOR, checkPolicyLines, FLASH_MS, pressedVariant, SAME_COLOR, dashboardLink, onlyDashboard, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
   rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
@@ -69,8 +69,10 @@ test('helpers: stats, sources, file lists, references, preferences', () => {
 
 // a fake engine with ERLA behind it; records what the panel and Claude's tool calls did
 function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
-  mock.clock(on)
-  const rec = { searchText: '{}', lastEval: null as unknown, mcp: [] as string[], searches: [] as Record<string, unknown>[], prompts: [] as string[], store: {} as Record<string, unknown>, refuse: '', reached: [] as string[], gpuReady: false,
+  const clock = mock.clock(on)
+  const rec = { clock, toasts: [] as string[],
+    // ms library_files takes to answer, so a test can look at the panel while the press runs
+    slowFiles: 0, searchText: '{}', lastEval: null as unknown, mcp: [] as string[], searches: [] as Record<string, unknown>[], prompts: [] as string[], store: {} as Record<string, unknown>, refuse: '', reached: [] as string[], gpuReady: false,
     // the install stub: the server offers only erla_setup_status, as after a plugin update
     stub: null as string | null,
     // the erla server is not running (the app reports it disconnected)
@@ -83,8 +85,9 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
     if (String(e.path).replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json')) return { value: '{"name": "erla", "version": "0.4.1"}' }
     throw new Error(`ENOENT: ${String(e.path)}`)
   })
-  on('mcp.call', ($, e) => {
+  on('mcp.call', async ($, e) => {
     if (e.tool !== 'index_status') rec.mcp.push(`${e.tool} ${JSON.stringify(e.args ?? {})}`)
+    if (e.tool === 'library_files' && rec.slowFiles) await clock.sleep(rec.slowFiles)
     if (rec.stub !== null) {
       if (e.tool === 'erla_setup_status') return { value: { content: [{ type: 'text', text: rec.stub }], isError: false } }
       // the rejection the panel showed on 2026-10-16 (engine 2.1.299), word for word
@@ -138,7 +141,10 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({ value: undefined }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', ($, e) => {
+    rec.toasts.push(e.text)
+    return { value: undefined }
+  })
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>engine</Text>
@@ -646,5 +652,146 @@ test('a dashboard link saved in an earlier session comes back with the card', as
   await $.command.run({ command: 'erla', args: '' } as never)
   const ui = await $.ui.mount({ plugin: 'erla', surface: 'terminal', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
   expect((await ui.find({ type: 'Link' }))?.props).toMatchObject({ href: DASH })
+  await ui.unmount()
+})
+
+// 2026-10-19, the owner on the released panel: "the card border colors are not all different". Status and
+// Relevance were both `suggestion`, KPI dashboard and Search both `claude`, and Library's `permission` is
+// the same colour as `suggestion` in Claude's themes. Two keys that draw one colour count as one here.
+const hue = (key: string) => SAME_COLOR[key] ?? key
+
+test('card colours: every card its own hue, only theme keys from the typed set', () => {
+  const colours = Object.values(CARD_COLOR).map(hue)
+  expect(new Set(colours).size).toBe(Object.keys(CARD_COLOR).length)
+  // a key outside the typed theme set could be drawn however a surface likes
+  for (const key of Object.values(CARD_COLOR)) {
+    expect(['warning', 'ide', 'bashBorder', 'claude', 'planMode', 'suggestion', 'merged', 'success']).toContain(key)
+  }
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`${surface}: every card the panel draws has an outline colour no other card has`, async ($, on) => {
+    const rec = fake(on)
+    rec.stub = 'Installing ERLA 0.5.8: this takes a few minutes.'      // the Setup card is drawn too
+    rec.store.settings = { dashboardShown: true }                         // and the KPI dashboard card
+    await $.session.start({ cwd: '/', surface, isInteractive: true })
+    await $.command.run({ command: 'erla', args: '' } as never)
+    const ui = await $.ui.mount({ plugin: 'erla', surface, component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+    const cards = (await ui.findAll({ type: 'Box' })).filter(b => b.props.borderStyle === 'round')
+    expect(cards.length).toBe(8)
+    const colours = cards.map(b => hue(String(b.props.borderColor)))
+    expect(new Set(colours).size).toBe(cards.length)
+    await ui.unmount()
+  })
+}
+
+test('button look: ⏳ while running, ✓ or ✗ after, dim only while it would wait', () => {
+  const busy = { key: 'reindex', phase: 'busy' as const, text: 'Starting…', seq: 1 }
+  expect(buttonLook('reindex', 'Refresh index', busy, true)).toEqual({ mark: '⏳', markColor: 'warning', text: 'Starting…', isPressed: true, dim: false })
+  expect(buttonLook('status', 'Refresh status', busy, true)).toEqual({ mark: null, markColor: null, text: 'Refresh status', isPressed: false, dim: true })
+  expect(buttonLook('reindex', 'Refresh index', { ...busy, phase: 'done', text: 'Started' }, false)).toMatchObject({ mark: '✓', markColor: 'success', text: 'Started' })
+  expect(buttonLook('reindex', 'Refresh index', { ...busy, phase: 'failed', text: 'Failed' }, false)).toMatchObject({ mark: '✗', markColor: 'error' })
+  expect(buttonLook('reindex', 'Refresh index', null, false)).toEqual({ mark: null, markColor: null, text: 'Refresh index', isPressed: false, dim: false })
+  expect(pressedVariant('primary')).toBe('secondary')
+  expect(pressedVariant('secondary')).toBe('primary')
+})
+
+// 2026-10-19, the owner: "when I click on them there is no response by the button that it has been clicked".
+// Each press must show on the Button itself, in every server state a user meets, then return to rest.
+const PRESS_OUTCOME = {
+  server: /^✓ Started$/,
+  stub: /^✗ Not ready$/,
+  disconnected: /^✗ Failed$/,
+  refused: /^✗ Failed$/,
+} as const
+
+for (const state of ['server', 'stub', 'disconnected', 'refused'] as const) {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface} (${state}): Refresh index shows its press on the Button, then returns to rest`, async ($, on) => {
+      const rec = fake(on)
+      if (state === 'stub') rec.stub = 'Installing ERLA 0.5.8: this takes a few minutes.'
+      rec.down = state === 'disconnected'
+      if (state === 'refused') rec.refuse = 'index_status'
+      await $.session.start({ cwd: '/', surface, isInteractive: true })
+      await $.command.run({ command: 'erla', args: '' } as never)
+      const ui = await $.ui.mount({ plugin: 'erla', surface, component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+      await rec.clock.settle()
+      // the engine waits a while for a server that is down, so the panel's opening status read (its
+      // Buttons dim meanwhile) ends only then; the busy toast itself is tested with List files below
+      if (state === 'disconnected') await rec.clock.advance(30000)
+
+      expect((await ui.find({ type: 'Button', key: 'reindex' }))?.props).toMatchObject({ variant: 'primary', dimColor: false })
+      expect(await ui.find({ type: 'Button', key: 'reindex', text: /^Refresh index$/ })).toBeDefined()
+
+      await ui.press({ key: 'reindex' })
+      const pressed = await ui.find({ type: 'Button', key: 'reindex', text: PRESS_OUTCOME[state] })
+      expect(pressed).toBeDefined()
+      expect(pressed?.props).toMatchObject({ variant: 'secondary' })              // drawn pressed
+      expect(rec.mcp.includes('index_start {}')).toBe(state === 'server')
+
+      await rec.clock.advance(FLASH_MS)
+      expect(await ui.find({ type: 'Button', key: 'reindex', text: /^Refresh index$/ })).toBeDefined()
+      expect((await ui.find({ type: 'Button', key: 'reindex' }))?.props).toMatchObject({ variant: 'primary' })
+      await ui.unmount()
+    })
+  }
+}
+
+test('while List files runs: its Button shows ⏳, waiting Buttons dim, a press on one says why in a toast', async ($, on) => {
+  const rec = fake(on)
+  rec.slowFiles = 5000
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+  await ui.input({ key: 'q', text: 'rivets', kind: 'change' })
+
+  await ui.press({ key: 'files' })
+  await rec.clock.settle()
+  const running = await ui.find({ type: 'Button', key: 'files', text: /^⏳ Listing…$/ })
+  expect(running?.props).toMatchObject({ variant: 'primary', dimColor: false })        // a secondary Button lights up
+  for (const key of ['reindex', 'status', 'browse', 'export']) {
+    expect((await ui.find({ type: 'Button', key }))?.props).toMatchObject({ dimColor: true })
+  }
+  for (const key of ['ask', 'clear']) {                                               // these never wait
+    expect((await ui.find({ type: 'Button', key }))?.props).toMatchObject({ dimColor: false })
+  }
+
+  await ui.press({ key: 'reindex' })
+  expect(rec.mcp.includes('index_start {}')).toBe(false)
+  expect(rec.toasts).toContain('ERLA is busy: Listing files for "rivets". Press again when it finishes.')
+
+  await rec.clock.advance(5000)
+  expect(await ui.find({ type: 'Button', key: 'files', text: /^✓ 2 found$/ })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'reindex' }))?.props).toMatchObject({ dimColor: false })
+  await ui.press({ key: 'reindex' })
+  expect(rec.mcp).toContain('index_start {}')
+  await ui.unmount()
+})
+
+test('quick presses confirm on their Buttons too: Ask ERLA, Clear list, Export with nothing to export', async ($, on) => {
+  const rec = fake(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+
+  await ui.press({ key: 'ask' })
+  expect(await ui.find({ type: 'Button', key: 'ask', text: /^✗ Type a question$/ })).toBeDefined()
+  await ui.input({ key: 'q', text: 'Kt shoulder', kind: 'change' })
+  await ui.press({ key: 'ask' })
+  expect(await ui.find({ type: 'Button', key: 'ask', text: /^✓ Sent$/ })).toBeDefined()
+  await ui.press({ key: 'export' })
+  expect(await ui.find({ type: 'Button', key: 'export', text: /^✗ Nothing to export$/ })).toBeDefined()
+  await ui.press({ key: 'clear' })
+  expect(await ui.find({ type: 'Button', key: 'clear', text: /^✓ Cleared$/ })).toBeDefined()
+  // a later press keeps its own confirmation: the earlier press's timer does not clear it
+  await rec.clock.advance(FLASH_MS - 1)
+  await ui.press({ key: 'clear' })
+  await rec.clock.advance(1)
+  expect(await ui.find({ type: 'Button', key: 'clear', text: /^✓ Cleared$/ })).toBeDefined()
+  await rec.clock.advance(FLASH_MS)
+  expect(await ui.find({ type: 'Button', key: 'clear', text: /^Clear list$/ })).toBeDefined()
+  expect(rec.prompts).toHaveLength(1)
   await ui.unmount()
 })

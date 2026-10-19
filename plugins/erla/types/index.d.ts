@@ -122,7 +122,14 @@ export type PanelView = {
   dashboardChoices: DashboardChoice[] | null
   busy: string | null
   message: { text: string; isError: boolean } | null
+  // the Button press the panel is showing on that Button, null when none
+  pressed: Pressed | null
 }
+
+// a press shown on its own Button: 'busy' while its work runs (⏳ and a short word), then 'done' (✓) or
+// 'failed' (✗) with the outcome for a moment; `seq` tells one press from the next, so an older press's
+// timer never clears a newer one
+export type Pressed = { key: string; phase: 'busy' | 'done' | 'failed'; text: string; seq: number }
 
 declare module 'claude-code' {
   interface PluginState {

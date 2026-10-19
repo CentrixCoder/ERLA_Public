@@ -1,7 +1,7 @@
 // Pure helpers for the /erla control panel in register.tsx (the engine follows $ only within
 // one file, so the panel's hooks live there).
 
-import type { DashboardChoice, EvalSummary, FileHit, LastSearch, PanelSettings, PanelView, RankedHit, Source } from '../types'
+import type { DashboardChoice, EvalSummary, FileHit, LastSearch, PanelSettings, PanelView, Pressed, RankedHit, Source } from '../types'
 
 export const DEFAULT_SETTINGS: PanelSettings = {
   units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default', dashboardUrl: null, dashboardShown: false,
@@ -308,4 +308,52 @@ export function qualityLine(e: EvalSummary | null): { text: string; level: 'ok' 
     return { text: `Search quality: nDCG@10 ${e.ndcg10.toFixed(2)} (${tail}). Too few questions to rely on: needs ${e.minQuestions}+.`, level: 'weak' }
   }
   return { text: `Search quality: nDCG@10 ${e.ndcg10.toFixed(2)} (${tail})`, level: 'ok' }
+}
+
+// ------------------------------------------------------------------ card colours and button feedback
+
+// each card's outline and title colour: its own theme hue, so no two cards look alike. Theme keys follow
+// the person's light or dark theme, so each stays readable in both. Claude's themes draw some keys in one
+// colour under two names (SAME_COLOR); only one name of each such pair is used here.
+export const CARD_COLOR = {
+  setup: 'warning',
+  status: 'ide',
+  dashboard: 'bashBorder',
+  search: 'claude',
+  relevance: 'planMode',
+  library: 'suggestion',
+  settings: 'merged',
+  sources: 'success',
+} as const
+
+// theme keys that are one colour in Claude's built-in themes, each mapped to the name used for it
+export const SAME_COLOR: Readonly<Record<string, string>> = { permission: 'suggestion', remember: 'suggestion', autoAccept: 'merged' }
+
+// how long a finished press keeps its ✓ or ✗ on its Button
+export const FLASH_MS = 2500
+
+export type ButtonLook = {
+  // ⏳ while the press runs, ✓ or ✗ just after; null at rest
+  mark: string | null
+  markColor: 'warning' | 'success' | 'error' | null
+  text: string
+  // drawn in the other variant while it shows a press, so the click shows at once
+  isPressed: boolean
+  // dim while another action runs: a press now would only be told to wait
+  dim: boolean
+}
+
+// what a panel Button shows: the press it is showing, or its own label (dim when it would have to wait)
+export function buttonLook(key: string, label: string, pressed: Pressed | null, waiting: boolean): ButtonLook {
+  if (pressed && pressed.key === key) {
+    const [mark, markColor] = pressed.phase === 'busy' ? ['⏳', 'warning'] as const
+      : pressed.phase === 'done' ? ['✓', 'success'] as const : ['✗', 'error'] as const
+    return { mark, markColor, text: pressed.text, isPressed: true, dim: false }
+  }
+  return { mark: null, markColor: null, text: label, isPressed: false, dim: waiting }
+}
+
+// the variant a pressed Button is drawn in: a primary one sinks to secondary, a secondary one lights up
+export function pressedVariant(variant: 'primary' | 'secondary'): 'primary' | 'secondary' {
+  return variant === 'primary' ? 'secondary' : 'primary'
 }

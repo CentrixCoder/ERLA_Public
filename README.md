@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.7-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.5.8-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,14 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.5.8
+
+- **The control panel answers every click.** The button you press changes at once: ⏳ and a short word while the
+  action runs, then ✓ or ✗ with the outcome for a moment (`✓ Started`, `✓ 2 found`, `✓ Copied`, `✗ Not ready`).
+- While an action runs, buttons that would have to wait are dimmed, and pressing one tells you what is running
+  instead of doing nothing. A button's label turns bold and underlined under the pointer.
+- Each card has its own outline colour, readable in light and dark themes.
+
 ### 0.5.7
 
 - **EPUB books** are now indexed, opened at a page or section and verified like PDFs. Books with a printed page
@@ -37,15 +45,6 @@ In short: the control panel finds your KPI dashboard for you.
 - **Find my dashboard.** On the KPI dashboard card (turn it on in the panel's Settings), press
   **Find my dashboard**. ERLA lists your claude.ai artifacts and saves the dashboard's link, or lets you
   pick it from the list. Pasting the address still works.
-
-### 0.5.2
-
-In short: ERLA's checker keeps up with new Claude models, and tells you when it has not been re-measured.
-- **Newest models.** The Professor follows the newest Claude Opus model, and Fable for its last-resort
-  re-check, without an ERLA update.
-- **Measured before trusted.** Every check records the exact model it ran on. Until that model has passed
-  ERLA's checker test (at least 90% of planted errors caught, at most 10% false alarms), the answer's
-  section G says "checker model not yet calibrated" and ERLA's protocol status lists it.
 
 <!-- release-notes:end -->
 

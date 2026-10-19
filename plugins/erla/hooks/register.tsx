@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, UiPressArgument } from 'claude-code'
 
 import type { FileHit, LibraryView, PanelSettings, PanelView, Progress, Source } from '../types'
 import { explain, MISSING_TOOL, RELOAD_HINT, setupError, setupFrom, splitPaths } from './library'
 import type { AddResult, RemoveResult, SiteInfo, StatusResult } from './library'
 import {
-  artifactsFrom, askPrompt, CHART_HITS, DASHBOARD_CHOICES, dashboardLink, DEFAULT_SETTINGS, evalFrom, onlyDashboard, filesFrom, isReranker, openPrompt, parseStats, preferencesSection, qualityLine,
-  checkPolicyLines, readSettings, referencesMarkdown, RERANKER_OPTIONS, rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
+  artifactsFrom, askPrompt, buttonLook, CARD_COLOR, CHART_HITS, DASHBOARD_CHOICES, dashboardLink, DEFAULT_SETTINGS, evalFrom, FLASH_MS, onlyDashboard, filesFrom, isReranker, openPrompt, parseStats,
+  preferencesSection, pressedVariant, qualityLine, checkPolicyLines, readSettings, referencesMarkdown, RERANKER_OPTIONS, rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
 const live = atom({ plugin: 'erla', key: 'live' } as const, null)
@@ -567,6 +567,7 @@ const PANEL_EMPTY: PanelView = {
   dashboardChoices: null,
   busy: null,
   message: null,
+  pressed: null,
 }
 
 const setPanel = ($: EngineInterface, change: Partial<PanelView>) =>
@@ -584,62 +585,102 @@ async function refreshStatus($: EngineInterface): Promise<void> {
   }
 }
 
-// one action at a time, as in the library dialog
-async function panelAct($: EngineInterface, busy: string, work: () => Promise<void>): Promise<void> {
+// one action at a time, as in the library dialog; resolves to the work's outcome word, if it gives one
+async function panelAct($: EngineInterface, busy: string, work: () => Promise<string | void>): Promise<string | void> {
   if ((await read($, panel))?.busy) return
   await setPanel($, { busy, message: null })
+  let outcome: string | void = undefined
   try {
-    await work()
+    outcome = await work()
   } catch (err) {
     await say($, err instanceof Error ? err.message : String(err), true)
   }
   await setPanel($, { busy: null })
+  return outcome
 }
 
-function refreshIndex($: EngineInterface): Promise<void> {
+let pressSeq = 0
+
+// Every Button press shows on that Button, so a click never looks ignored: at once it is drawn pressed
+// (the other variant) with ⏳ and a short word while the work runs, then ✓ or ✗ and the outcome for
+// FLASH_MS. Buttons whose press would wait draw dim meanwhile, and a press on one says in a toast what
+// runs instead of doing nothing. `waits: false` for presses that never wait (they call no ERLA action).
+// The outcome is the work's own word, else "Done", or on an error message "Failed" ("Not ready" while
+// the server is the install stub); `library` reads the Library card's message instead of the panel's.
+async function press(
+  $: EngineInterface, key: string, busyText: string, work: () => Promise<string | void>,
+  opts: { waits?: boolean; library?: boolean } = {},
+): Promise<void> {
+  const waits = opts.waits ?? true
+  const running = (await read($, panel))?.busy ?? (await read($, library))?.busy ?? null
+  if (waits && running) {
+    $.ui.toast(`ERLA is busy: ${running.replace(/…$/, '')}. Press again when it finishes.`)
+    return
+  }
+  const seq = ++pressSeq
+  await setPanel($, { pressed: { key, phase: 'busy', text: busyText, seq }, ...(opts.library ? {} : { message: null }) })
+  let outcome: string | void = undefined
+  try {
+    outcome = await work()
+  } catch (err) {
+    await say($, err instanceof Error ? err.message : String(err), true)
+  }
+  const view = (await read($, panel)) ?? PANEL_EMPTY
+  const failed = Boolean((opts.library ? (await read($, library))?.message : view.message)?.isError)
+  const text = outcome || (failed ? (view.setup ? 'Not ready' : 'Failed') : 'Done')
+  await setPanel($, { pressed: { key, phase: failed ? 'failed' : 'done', text, seq } })
+  $.clock.after(FLASH_MS, () => {
+    void update($, panel, v => (v && v.pressed?.seq === seq ? { ...v, pressed: null } : v))
+  })
+}
+
+function refreshIndex($: EngineInterface): Promise<string | void> {
   return panelAct($, 'Starting the index refresh…', async () => {
     try {
       const status = await call<StatusResult>($, 'index_status', { tail: 1 })
       if (status.status?.state === 'running') {
         await say($, 'An index job is already running: the progress bar above the prompt shows it.')
-        return
+        return 'Already running'
       }
       await call<unknown>($, 'index_start')
       await say($, 'Index refresh started: the progress bar above the prompt shows it.')
+      return 'Started'
     } catch (err) {
       await say($, explain('index_start', err), true)
     }
   })
 }
 
-async function ask($: EngineInterface, query: string): Promise<void> {
+async function ask($: EngineInterface, query: string): Promise<string> {
   const q = query.trim()
   if (!q) {
     await say($, 'Type a question in the search box first.', true)
-    return
+    return 'Type a question'
   }
   const s = await read($, settings)
   await $.prompt.submit({ text: askPrompt(q, s.scope), asUser: true })
   await say($, 'Sent to Claude: the answer arrives in the conversation as a Result Packet.')
+  return 'Sent'
 }
 
 // the PDF viewer is a tool Claude calls, so Open asks Claude to show the file at its cited page
-async function openSource($: EngineInterface, doc: Source): Promise<void> {
+async function openSource($: EngineInterface, doc: Source): Promise<string> {
   await $.prompt.submit({ text: openPrompt(doc), asUser: true })
   await say($, `Opening ${doc.title} in the PDF viewer in the conversation.`)
+  return 'Sent'
 }
 
-async function listFiles($: EngineInterface, query: string): Promise<void> {
+async function listFiles($: EngineInterface, query: string): Promise<string | void> {
   const q = query.trim()
   if (!q) {
     await say($, 'Type a topic in the search box first.', true)
-    return
+    return 'Type a topic'
   }
   if ((await read($, settings)).scope === 'web') {
     await say($, '"Search in" is set to Web only, so the library is not listed. Change it under Settings.', true)
-    return
+    return 'Web only'
   }
-  await panelAct($, `Listing files for "${q}"…`, async () => {
+  return panelAct($, `Listing files for "${q}"…`, async () => {
     let text: string
     try {
       text = JSON.stringify(await call<unknown>($, 'library_files', { query: q, k: 30 }))
@@ -653,6 +694,7 @@ async function listFiles($: EngineInterface, query: string): Promise<void> {
     await say($, files.length
       ? `${files.length} file(s) for "${q}"${s.excludeRestricted ? ' (restricted documents left out)' : ''}.`
       : `No files for "${q}".`)
+    return files.length ? `${files.length} found` : 'None found'
   })
 }
 
@@ -698,7 +740,7 @@ async function saveDashboard($: EngineInterface, value: string): Promise<void> {
 // once, otherwise the card offers the list to pick from. Pasting stays the fallback.
 const NO_LISTING = 'Paste the dashboard\'s https:// link below instead (open the dashboard in your browser and copy its address).'
 
-function findDashboard($: EngineInterface): Promise<void> {
+function findDashboard($: EngineInterface): Promise<string | void> {
   return panelAct($, 'Looking up your claude.ai artifacts…', async () => {
     let text: string | null
     try {
@@ -715,23 +757,25 @@ function findDashboard($: EngineInterface): Promise<void> {
     const choices = artifactsFrom(text)
     if (!choices.length) {
       await say($, `No claude.ai artifacts found for your account. Ask Claude to build your KPI dashboard, or ${NO_LISTING.charAt(0).toLowerCase()}${NO_LISTING.slice(1)}`, true)
-      return
+      return 'None found'
     }
     const only = onlyDashboard(choices)
     if (only) {
       await changeSettings($, { dashboardUrl: only.url })
       await setPanel($, { dashboardChoices: null })
       await say($, `Found "${only.title}" and saved its link: Open KPI dashboard opens it in your browser.`)
-      return
+      return 'Found'
     }
     await setPanel($, { dashboardChoices: choices.slice(0, DASHBOARD_CHOICES) })
     await say($, 'Pick your dashboard from your artifacts below.')
+    return 'Pick one below'
   })
 }
 
-async function copyDashboard($: EngineInterface, url: string, surface: Parameters<EngineInterface['ui']['copy']>[0]['surface']): Promise<void> {
+async function copyDashboard($: EngineInterface, url: string, surface: Parameters<EngineInterface['ui']['copy']>[0]['surface']): Promise<string> {
   const res = await $.ui.copy({ text: url, surface })
   await say($, res.isCopied ? 'Dashboard link copied.' : 'Could not copy the link here: select it above instead.', !res.isCopied)
+  return res.isCopied ? 'Copied' : 'Not copied'
 }
 
 function feedback($: EngineInterface, doc: Source, verdict: 'useful' | 'not_useful'): Promise<void> {
@@ -747,12 +791,12 @@ function feedback($: EngineInterface, doc: Source, verdict: 'useful' | 'not_usef
   })
 }
 
-function exportReferences($: EngineInterface): Promise<void> {
+function exportReferences($: EngineInterface): Promise<string | void> {
   return panelAct($, 'Exporting references…', async () => {
     const list = await read($, sources)
     if (!list.length) {
       await say($, 'No documents opened yet this session.', true)
-      return
+      return 'Nothing to export'
     }
     const stamp = new Date(await $.clock.now()).toISOString()
     try {
@@ -761,6 +805,7 @@ function exportReferences($: EngineInterface): Promise<void> {
         markdown: referencesMarkdown(list, stamp.slice(0, 10)),
       })
       await say($, `References written to ${(res.written ?? []).join(', ')}`)
+      return 'Exported'
     } catch (err) {
       await say($, explain('export_packet', err), true)
     }
@@ -787,8 +832,8 @@ function registerPanel(on: Parameters<Register>[0]): void {
     const ls = await read($, lastSearch)
     const quality = qualityLine(v.lastEval)
 
-    // theme colors, so the panel reads in light and dark themes alike
-    const ACCENT = { status: 'suggestion', search: 'claude', relevance: 'suggestion', library: 'permission', settings: 'merged', sources: 'success', dashboard: 'claude' } as const
+    // theme colors, so the panel reads in light and dark themes alike; each card has its own (CARD_COLOR)
+    const ACCENT = CARD_COLOR
     // one section: a rounded card with a colored title
     const card = (key: string, title: string, color: string, ...body: unknown[]) => (
       <Box key={key} flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} marginBottom={1}>
@@ -796,10 +841,29 @@ function registerPanel(on: Parameters<Register>[0]): void {
         {body}
       </Box>
     )
+    // one action Button with its press feedback (press() above): pressed variant and ⏳ / ✓ / ✗ while it
+    // shows a press, dim while another action runs and a press would wait, bold and underlined under the
+    // pointer. `scope` names its hover group (a short one where the key holds a path).
+    const waiting = Boolean(v.busy ?? lib.busy)
+    const button = (key: string, label: string, variant: 'primary' | 'secondary', onPress: (e: UiPressArgument) => void,
+      opts: { waits?: boolean; scope?: string } = {}) => {
+      const look = buttonLook(key, label, v.pressed, (opts.waits ?? true) && waiting)
+      return (
+        <Button
+          key={key}
+          variant={look.isPressed ? pressedVariant(variant) : variant}
+          dimColor={look.dim}
+          hover={{ scope: `erla-button:${opts.scope ?? key}`, bold: true, underline: true }}
+          onPress={onPress}
+        >
+          {look.mark ? [<Text key="mark" color={look.markColor ?? undefined} bold>{look.mark}</Text>, ` ${look.text}`] : look.text}
+        </Button>
+      )
+    }
     const stateColor = v.indexState === 'CURRENT' ? 'success' : v.indexState ? 'warning' : 'subtle'
     const unitLabel = (u: string) => (u === 'config' ? `Library default (${v.configUnits ?? 'US'})` : u === 'US' ? 'US customary' : 'SI')
     const toggle = (key: string, isOn: boolean, label: string, onPress: () => void) => (
-      <Button key={key} plain onPress={onPress}>
+      <Button key={key} plain hover={{ scope: `erla-button:${key}`, bold: true }} onPress={onPress}>
         <Text color={isOn ? 'success' : 'subtle'} bold>{isOn ? '☑' : '☐'}</Text>
         <Text dimColor={!isOn}>{` ${label}`}</Text>
       </Button>
@@ -815,7 +879,7 @@ function registerPanel(on: Parameters<Register>[0]): void {
         </Box>
 
         {v.setup
-          ? card('setup', v.setup.done ? 'Setup: reconnect ERLA' : 'Setup: ERLA is installing', 'warning',
+          ? card('setup', v.setup.done ? 'Setup: reconnect ERLA' : 'Setup: ERLA is installing', ACCENT.setup,
             <Text key="setup-head" color="warning">
               {v.setup.done
                 ? `ERLA ${v.pluginVersion ?? ''} is installed, but this session still talks to the installer. ${RELOAD_HINT}`.replace(/\s+/g, ' ')
@@ -823,7 +887,10 @@ function registerPanel(on: Parameters<Register>[0]): void {
             </Text>,
             <Text key="setup-report" color="subtle">{v.setup.text}</Text>,
             <Box key="setup-actions" gap={1} marginTop={1}>
-              <Button key="setup-check" variant="primary" onPress={() => void panelAct($, 'Reading ERLA status…', () => refreshStatus($))}>Check again</Button>
+              {button('setup-check', 'Check again', 'primary', () => void press($, 'setup-check', 'Checking…', async () => {
+                await panelAct($, 'Reading ERLA status…', () => refreshStatus($))
+                return (await read($, panel))?.message?.isError ? undefined : 'Ready'
+              }))}
             </Box>,
           )
           : null}
@@ -839,11 +906,14 @@ function registerPanel(on: Parameters<Register>[0]): void {
           </Box>,
           <Text key="quality" color={quality.level === 'ok' ? 'success' : quality.level === 'weak' ? 'warning' : 'subtle'}>{quality.text}</Text>,
           job
-            ? <Text key="job" color="suggestion">{`⟳ Indexing now: ${PHASE_LABEL[job.phase] ?? job.phase}${job.done !== null ? ` ${job.done}/${job.total}` : ''}`}</Text>
+            ? <Text key="job" color={ACCENT.status}>{`⟳ Indexing now: ${PHASE_LABEL[job.phase] ?? job.phase}${job.done !== null ? ` ${job.done}/${job.total}` : ''}`}</Text>
             : null,
           <Box key="actions" gap={1} marginTop={1}>
-            <Button key="reindex" variant="primary" onPress={() => void refreshIndex($)}>Refresh index</Button>
-            <Button key="status" variant="secondary" onPress={() => void panelAct($, 'Reading ERLA status…', () => refreshStatus($))}>Refresh status</Button>
+            {button('reindex', 'Refresh index', 'primary', () => void press($, 'reindex', 'Starting…', () => refreshIndex($)))}
+            {button('status', 'Refresh status', 'secondary', () => void press($, 'status', 'Reading…', async () => {
+              await panelAct($, 'Reading ERLA status…', () => refreshStatus($))
+              return (await read($, panel))?.message?.isError ? undefined : 'Updated'
+            }))}
           </Box>,
         )}
 
@@ -858,7 +928,7 @@ function registerPanel(on: Parameters<Register>[0]): void {
                 <Box key="dash-choices" flexDirection="column" marginTop={1}>
                   <Text key="dash-choices-head" color="subtle">Your artifacts (press one to use it):</Text>
                   {v.dashboardChoices.map((c, i) => (
-                    <Button key={`dash-pick-${i}`} plain onPress={() => void saveDashboard($, c.url)}>
+                    <Button key={`dash-pick-${i}`} plain hover={{ scope: `erla-button:dash-pick-${i}`, bold: true, underline: true }} onPress={() => void saveDashboard($, c.url)}>
                       <Text color="claude">{`→ ${c.title}`}</Text>
                     </Button>
                   ))}
@@ -880,14 +950,21 @@ function registerPanel(on: Parameters<Register>[0]): void {
             <Box key="dash-actions" gap={1} marginTop={1}>
               {s.dashboardUrl
                 ? null
-                : <Button key="dash-find" variant="primary" onPress={() => void findDashboard($)}>Find my dashboard</Button>}
+                : button('dash-find', 'Find my dashboard', 'primary', () => void press($, 'dash-find', 'Looking…', () => findDashboard($)))}
               {s.dashboardUrl
-                ? <Button key="dash-copy" variant="secondary" onPress={press => void copyDashboard($, s.dashboardUrl ?? '', press.surface)}>Copy link</Button>
+                ? button('dash-copy', 'Copy link', 'secondary',
+                  e => void press($, 'dash-copy', 'Copying…', () => copyDashboard($, s.dashboardUrl ?? '', e.surface), { waits: false }), { waits: false })
                 : null}
               {s.dashboardUrl
-                ? <Button key="dash-change" variant="secondary" onPress={() => void changeSettings($, { dashboardUrl: null })}>Change link</Button>
+                ? button('dash-change', 'Change link', 'secondary', () => void press($, 'dash-change', 'Changing…', async () => {
+                  await changeSettings($, { dashboardUrl: null })
+                  await say($, 'Link cleared: press Find my dashboard or paste the new link.')
+                }, { waits: false }), { waits: false })
                 : null}
-              <Button key="dash-hide" variant="secondary" onPress={() => void changeSettings($, { dashboardShown: false })}>Hide</Button>
+              {button('dash-hide', 'Hide', 'secondary', () => void press($, 'dash-hide', 'Hiding…', async () => {
+                await changeSettings($, { dashboardShown: false })
+                await say($, 'KPI dashboard card hidden: Settings → Show the KPI dashboard card brings it back.')
+              }, { waits: false }), { waits: false })}
             </Box>,
           )
           : null}
@@ -909,8 +986,8 @@ function registerPanel(on: Parameters<Register>[0]): void {
             />
           </Box>,
           <Box key="search-actions" gap={1} marginTop={1}>
-            <Button key="ask" variant="primary" onPress={() => void ask($, v.query)}>Ask ERLA</Button>
-            <Button key="files" variant="secondary" onPress={() => void listFiles($, v.query)}>List files</Button>
+            {button('ask', 'Ask ERLA', 'primary', () => void press($, 'ask', 'Sending…', () => ask($, v.query), { waits: false }), { waits: false })}
+            {button('files', 'List files', 'secondary', () => void press($, 'files', 'Listing…', () => listFiles($, v.query)))}
           </Box>,
           v.files && v.files.length
             ? (
@@ -958,19 +1035,18 @@ function registerPanel(on: Parameters<Register>[0]): void {
         {card('library', `Library folders (${lib.roots.length})`, ACCENT.library,
           <Text key="ro" color="subtle">ERLA only reads these folders. Changes reach searches after an index run.</Text>,
           lib.roots.length === 0 && !lib.busy ? <Text key="none" color="subtle">No library folders yet. Add one below.</Text> : null,
-          ...lib.roots.map(root => (
+          ...lib.roots.map((root, i) => (
             <Box key={`root:${root}`} justifyContent="space-between" alignItems="center" gap={2}>
               <Box gap={1} flexShrink={1}>
                 <Text color={ACCENT.library}>▸</Text>
                 <Text bold wrap="truncate-middle">{root}</Text>
               </Box>
-              <Button
-                key={`rm:${root}`}
-                variant={lib.confirmRemove === root ? 'primary' : 'secondary'}
-                onPress={() => void remove($, root)}
-              >
-                {lib.confirmRemove === root ? 'Confirm remove' : 'Remove'}
-              </Button>
+              {button(`rm:${root}`, lib.confirmRemove === root ? 'Confirm remove' : 'Remove', lib.confirmRemove === root ? 'primary' : 'secondary',
+                // the first press turns it into Confirm remove (its feedback); the second removes
+                () => void (lib.confirmRemove === root
+                  ? press($, `rm:${root}`, 'Removing…', () => remove($, root), { library: true })
+                  : remove($, root)),
+                { scope: `rm:${i}` })}
             </Box>
           )),
           lib.filesOnDisk !== null
@@ -996,9 +1072,13 @@ function registerPanel(on: Parameters<Register>[0]): void {
             />
           </Box>,
           <Box key="lib-actions" gap={1} marginTop={1} alignItems="center">
-            <Button key="browse" variant="primary" onPress={() => void add($, null)}>Browse…</Button>
+            {button('browse', 'Browse…', 'primary', () => void press($, 'browse', 'Picker open…', async () => {
+              await add($, null)
+              const m = (await read($, library))?.message
+              return m?.isError ? undefined : m && /^Added/.test(m.text) ? 'Added' : 'No change'
+            }, { library: true }))}
             {lib.needsIndex
-              ? <Button key="index" variant="primary" onPress={() => void indexNow($)}>Index changes</Button>
+              ? button('index', 'Index changes', 'primary', () => void press($, 'index', 'Starting…', () => indexNow($), { library: true }))
               : <Text color="subtle">Browse opens the Windows folder picker (it may open behind other windows).</Text>}
           </Box>,
           lib.needsIndex ? <Text key="needs" color="warning">Folders changed: press Index changes to bring them into searches.</Text> : null,
@@ -1049,14 +1129,19 @@ function registerPanel(on: Parameters<Register>[0]): void {
               {doc.tier ? <Text color="suggestion">{doc.tier}</Text> : null}
               <Text>{doc.title}</Text>
               {doc.pages.length ? <Text color="subtle">{doc.pages.slice(0, 4).join(', ')}{doc.pages.length > 4 ? '…' : ''}</Text> : null}
-              {doc.ext === 'pdf' ? <Button key={`open:${doc.docId}`} variant="secondary" onPress={() => void openSource($, doc)}>Open</Button> : null}
+              {doc.ext === 'pdf'
+                ? button(`open:${doc.docId}`, 'Open', 'secondary', () => void press($, `open:${doc.docId}`, 'Sending…', () => openSource($, doc), { waits: false }), { waits: false })
+                : null}
               <Button key={`up:${doc.docId}`} plain dimColor={doc.verdict !== 'useful'} onPress={() => void feedback($, doc, 'useful')}>👍</Button>
               <Button key={`down:${doc.docId}`} plain dimColor={doc.verdict !== 'not_useful'} onPress={() => void feedback($, doc, 'not_useful')}>👎</Button>
             </Box>
           )),
           <Box key="source-actions" gap={1} marginTop={1}>
-            <Button key="export" variant="primary" onPress={() => void exportReferences($)}>Export references</Button>
-            <Button key="clear" variant="secondary" onPress={() => void update($, sources, () => [])}>Clear list</Button>
+            {button('export', 'Export references', 'primary', () => void press($, 'export', 'Exporting…', () => exportReferences($)))}
+            {button('clear', 'Clear list', 'secondary', () => void press($, 'clear', 'Clearing…', async () => {
+              await update($, sources, () => [])
+              return 'Cleared'
+            }, { waits: false }), { waits: false })}
           </Box>,
         )}
 
