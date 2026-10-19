@@ -29,12 +29,12 @@ from typing import Any
 import yaml
 
 from . import __version__, safeio
-from .config import core_dir
+from .config import core_dir, include_extensions
 
 REVIEW_INTERVAL_DAYS = 90
 
 BASE_EXT = ["pdf", "docx", "xlsx", "xlsm", "xls", "csv", "pptx", "txt", "md", "json",
-            "f06", "bdf", "dat", "op2", "inp"]
+            "f06", "bdf", "dat", "op2", "inp", "epub"]
 LEGACY_COM_EXT = ["doc", "ppt"]
 
 DEFAULT_EXCLUDES = ["**/~$*", "**/.git/**", "**/__pycache__/**", "**/*.py", "**/*.pyc",
@@ -487,7 +487,8 @@ def resurvey(site: Path, max_seconds: float = 900) -> dict:
     cfg_path = site / "config" / "library_config.yaml"
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     roots = [Path(r) for r in raw["library_roots"]]
-    surv = survey_library(roots, raw.get("include_ext", BASE_EXT), raw.get("exclude_globs", DEFAULT_EXCLUDES),
+    surv = survey_library(roots, sorted(include_extensions(raw.get("include_ext", BASE_EXT))),
+                          raw.get("exclude_globs", DEFAULT_EXCLUDES),
                           max_seconds)
     tess = Path(raw["ocr"]["tesseract_cmd"]) if (raw.get("ocr") or {}).get("tesseract_cmd") else detect_tesseract()
     cfg = {**build_site_config(site, roots), **raw}

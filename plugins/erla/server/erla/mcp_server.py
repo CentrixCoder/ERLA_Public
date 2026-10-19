@@ -502,9 +502,8 @@ def t_library_show(doc_id: int, locator: str | None = None, context: int = 0, ch
                        (doc_id,)).fetchall()
     if not locator:
         return {"document": meta, "chunks": len(rows), "locators": [r["locator"] for r in rows[:300]]}
-    want = locator.lower().strip()
-    sel = [r for r in rows if r["locator"].lower() == want] or \
-          [r for r in rows if r["locator"].lower().startswith(want)]
+    from .store import at_locator
+    sel = at_locator(rows, locator)
     if not sel:
         return {"document": meta, "error": f"locator '{locator}' not found",
                 "available": [r["locator"] for r in rows[:120]]}
@@ -611,7 +610,7 @@ def t_verify_packet(items: list[dict]) -> dict:
 def calc_tool(tool: str):
     """The MCP function for an installed specialist's calculation tool: runs it and records the run, so
     verify_packet can check reported values against it (0.2.19)."""
-    spec = next((sp for sp in installed().values() if sp["tool"] == tool), None)
+    spec = next((sp for sp in installed().values() if sp.get("tool") == tool), None)
     if spec is None:
         raise KeyError(f"no installed calculation tool {tool!r}")
 
@@ -894,7 +893,7 @@ def build_server():
     reg(t_reranker_status, "reranker_status", "The search re-rankers this install offers and whether each can "
         "run on this computer (PyTorch, CUDA, GPU memory), with the fix when it cannot.", ro)
     reg(t_library_show, "library_show", "Open a document at a locator (e.g. 'p.287', 'Sheet1!A1:H40', "
-        "'slide 12') and return the exact chunk text. Required before citing any value. Without a "
+        "'slide 12', EPUB 'p.69' or 'item 12 §3.4 Pivot Tables') and return the exact chunk text. Required before citing any value. Without a "
         "locator, lists the document's locators.", ro)
     reg(t_library_files, "library_files", "File inventory for a topic (workflow W1): documents grouped "
         "by type with path, year, tier, flag, duplicate count.", ro)
@@ -917,7 +916,8 @@ def build_server():
         "verification_id for log_request. UNCONFIRMED: the number is on the page but no property record or table "
         "row confirms the row or column claimed for it - not verified.", ro)
     for spec in spec_on.values():           # names and descriptions live in the specialist modules
-        reg(calc_tool(spec["tool"]), spec["tool"], spec["description"], ro)
+        if spec.get("tool"):                # a discipline may have no calculation tool (programming)
+            reg(calc_tool(spec["tool"]), spec["tool"], spec["description"], ro)
     reg(t_protocol_section, "protocol_section", "Read one part of a protocol file instead of the whole file: "
         "file a protocol name (e.g. 'skills'), key a block id (e.g. 'S8', 'W1', 'G2') or a section number "
         "('5'). Read erla://protocols/<file>/index first for the list of keys.", ro)

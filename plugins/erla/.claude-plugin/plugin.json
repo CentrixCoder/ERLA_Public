@@ -1,7 +1,7 @@
 {
   "name": "erla",
   "displayName": "ERLA - Engineering Research Library Agent",
-  "version": "0.5.3",
+  "version": "0.5.7",
   "description": "Finds, extracts, verifies and cites engineering data (allowables, Kt, fatigue, standards clauses, prior FEA runs) from this computer's engineering library, with traceable Result Packets. The library is read-only; controlled documents never reach web queries.",
   "author": {
     "name": "ERLA maintainers"

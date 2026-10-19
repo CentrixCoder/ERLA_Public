@@ -100,6 +100,7 @@ class Extractor:
 
     exts: tuple[str, ...] = ()
     needs_com: bool = False
+    version: str = ""      # set when the output changes: the indexer re-reads files read by another version
 
     def __init__(self, cfg=None):
         self.cfg = cfg

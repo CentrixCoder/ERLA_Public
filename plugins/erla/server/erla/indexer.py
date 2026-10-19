@@ -64,6 +64,16 @@ def iter_library(cfg: Config):
                 yield p, p.relative_to(root).as_posix(), root
 
 
+XVER_SQL = "CASE WHEN json_valid(meta_json) THEN json_extract(meta_json, '$.extractor') END"
+
+
+def outdated_extract(ext: str, stamp: str | None, status: str | None) -> bool:
+    """True when a document was read by an older version of its extractor (one that sets ``version``).
+    Duplicates are never extracted themselves and failed files are retried anyway."""
+    want = getattr(EXTRACTORS.get(ext), "version", "")
+    return bool(want) and stamp != want and status not in ("duplicate", "failed")
+
+
 def probe_library(cfg: Config, con) -> dict:
     """Change probe (P2): stat-only walk of the library vs the index. Never opens file contents.
 
@@ -78,6 +88,8 @@ def probe_library(cfg: Config, con) -> dict:
         if last_ts.tzinfo is None:
             last_ts = last_ts.replace(tzinfo=timezone.utc)
     indexed = {r[0]: (r[1], r[2]) for r in con.execute("SELECT path, size, mtime FROM documents")}
+    outdated = sum(1 for ext, stamp, status in con.execute(
+        f"SELECT ext, {XVER_SQL}, extract_status FROM documents") if outdated_extract(ext or "", stamp, status))
     on_disk = new = changed = large = 0
     newest_m, newest_p = 0.0, None
     seen: set[str] = set()
@@ -114,11 +126,13 @@ def probe_library(cfg: Config, con) -> dict:
         reasons.append(f"{changed} indexed file(s) changed")
     if missing:
         reasons.append(f"{missing} indexed file(s) no longer on disk")
+    if outdated:
+        reasons.append(f"{outdated} indexed file(s) read by an older extractor")
     if last_ts and newest_m and newest_m > last_ts.timestamp():
         reasons.append("library modified after last full index")
     return {"last_index_at": last, "age_days": age, "stale_days": cfg.stale_days,
             "files_on_disk": on_disk, "documents_indexed": len(indexed), "new": new, "changed": changed,
-            "missing": missing, "skipped_large": large, "newest_mtime": newest_iso, "newest_file": newest_p,
+            "missing": missing, "outdated_extract": outdated, "skipped_large": large, "newest_mtime": newest_iso, "newest_file": newest_p,
             "stale": bool(reasons), "reasons": reasons}
 
 
@@ -155,7 +169,10 @@ class Indexer:
                     "SELECT doc_id FROM duplicates WHERE canonical_doc_id=? AND kind='exact'", (doc_id,))]
             store.delete_document(con, doc_id)
         ext = path.suffix.lower().lstrip(".")
-        meta = res.meta or {}
+        meta = dict(res.meta or {})
+        if getattr(EXTRACTORS.get(ext), "version", ""):
+            # a read that skipped Office for this run only stays outdated, so the next run reads it again
+            meta["extractor"] = EXTRACTORS[ext].version + ("+pending" if meta.get("com_skipped") else "")
         title = meta.get("title") or meta.get("title_guess") or path.stem
         head = "\n".join(c.text for c in res.chunks[:2])
         tail = "\n".join(c.text for c in res.chunks[-2:]) if len(res.chunks) > 2 else ""
@@ -262,13 +279,16 @@ class Indexer:
         try:
             res = cls(self.cfg, worker=worker).extract(path)
         except Exception as exc:
-            dead[kind] = 3
+            dead[kind] = 99                     # Office cannot start: native reads are final
             self._com[kind].kill()
             self.log(f"  COM {kind} unavailable for this run: {exc}")
             res = cls(self.cfg, worker=False).extract(path)
-        if res.status == "failed" and "timeout" in (res.error or ""):
-            dead[kind] = dead.get(kind, 0) + 1
-        elif res.status != "failed" and dead.get(kind, 0) < 3:
+        if worker is False and dead.get(kind, 0) == 3:
+            # skipped only because this run's timeouts tripped the breaker: the next run gives it to Office
+            res.meta = {**(res.meta or {}), "com_skipped": True}
+        elif "timeout" in (res.error or "") + str((res.meta or {}).get("com_error", "")):
+            dead[kind] = min(dead.get(kind, 0) + 1, 3)
+        elif res.status != "failed" and not (res.meta or {}).get("com_error") and dead.get(kind, 0) < 3:
             dead[kind] = 0                      # consecutive-failure counter resets on success
         return res
 
@@ -279,7 +299,7 @@ class Indexer:
         st = IndexStats()
         con = self.con
         existing = {r["path"]: r for r in con.execute(
-            "SELECT doc_id, path, size, mtime, sha256, extract_status FROM documents")}
+            f"SELECT doc_id, path, size, mtime, sha256, extract_status, {XVER_SQL} AS xver FROM documents")}
         by_sha = {r["sha256"]: r["doc_id"] for r in existing.values()
                   if r["sha256"] and r["extract_status"] != "duplicate"}
         seen_paths: set[str] = set()
@@ -315,7 +335,8 @@ class Indexer:
             orphan = old is not None and old["doc_id"] in orphans
             if orphan:
                 st.repaired += 1
-            if (old and not full and not orphan and old["extract_status"] != "failed"
+            stale_x = bool(old) and outdated_extract(ext, old["xver"], old["extract_status"])
+            if (old and not full and not orphan and not stale_x and old["extract_status"] != "failed"
                     and old["size"] == s.st_size and abs((old["mtime"] or 0) - s.st_mtime) < 1e-3):
                 st.unchanged += 1
                 continue
@@ -325,7 +346,7 @@ class Indexer:
                 st.failed += 1
                 st.failures.append(f"{rel}: read {exc}")
                 continue
-            if old and old["sha256"] == sha and not full and not orphan:
+            if old and old["sha256"] == sha and not full and not orphan and not stale_x:
                 con.execute("UPDATE documents SET mtime=?, size=? WHERE doc_id=?", (s.st_mtime, s.st_size, old["doc_id"]))
                 st.unchanged += 1
                 continue

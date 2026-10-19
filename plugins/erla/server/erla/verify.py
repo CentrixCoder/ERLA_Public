@@ -120,9 +120,8 @@ class _Doc:
                                   "WHERE doc_id=? ORDER BY seq", (doc_id,)).fetchall() if self.row else []
 
     def at(self, locator: str) -> list[sqlite3.Row]:
-        want = locator.lower().strip()
-        return [r for r in self.chunks if r["locator"].lower() == want] or \
-               [r for r in self.chunks if r["locator"].lower().startswith(want)]
+        from .store import at_locator
+        return at_locator(self.chunks, locator)
 
     def near(self, sel: list[sqlite3.Row]) -> list[sqlite3.Row]:
         seqs = {r["seq"] for r in sel}
@@ -139,6 +138,8 @@ def _quality(doc: _Doc, row: sqlite3.Row, written: str | None) -> list[str]:
             q = {}
     if doc.row["ocr_used"] or "ocr_conf" in q:
         w.append("OCR-derived text: mark the value OCR, lower confidence one level, recommend a visual check (G3.5)")
+    extract_warnings: list[Any] = q.get("warnings") or []
+    w += [str(x) for x in extract_warnings]                  # extraction warnings (EPUB, 0.5.6)
     if written and written in (q.get("low_conf_numbers") or []):
         w.append(f"OCR_LOW_CONF: '{written}' was read with low OCR confidence - verify it on the page")
     return w
@@ -555,7 +556,7 @@ def _calc_tools() -> dict[str, tuple[re.Pattern[str], re.Pattern[str]]]:
     """Calc tools of the installed specialists (none in the free core edition): the quantities each certainly
     computes (a hand calculation of one fails) and may compute (claiming not_covered is flagged)."""
     from .specialists import installed
-    return {str(s["tool"]): (s["required"], s["covered"]) for s in installed().values()}
+    return {str(s["tool"]): (s["required"], s["covered"]) for s in installed().values() if s.get("tool")}
 
 
 def _tool(run: dict[str, Any]) -> str:

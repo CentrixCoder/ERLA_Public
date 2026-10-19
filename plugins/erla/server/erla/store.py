@@ -156,6 +156,24 @@ def has_column(con: sqlite3.Connection, table: str, column: str) -> bool:
     return column in {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
 
 
+def at_locator(rows: list[sqlite3.Row], locator: str) -> list[sqlite3.Row]:
+    """The chunks a cited locator names: the exact locator, else the locators it begins at a word boundary
+    ('p.6' opens 'p.6 part 2' and 'p.6 table 1', never 'p.60'; EPUB 'item 3' opens 'item 3 §Scope', never
+    'item 30'). A blank locator names nothing. One rule for library_show, erla show and verify_packet."""
+    want = locator.lower().strip()
+    if not want:
+        return []
+    exact = [r for r in rows if str(r["locator"]).lower() == want]
+    if exact:
+        return exact
+    out: list[sqlite3.Row] = []
+    for r in rows:
+        loc = str(r["locator"]).lower()
+        if loc.startswith(want) and (len(loc) == len(want) or not (want[-1].isalnum() and loc[len(want)].isalnum())):
+            out.append(r)
+    return out
+
+
 def quality_expr(con: sqlite3.Connection, alias: str = "c") -> str:
     """SELECT expression for chunks.quality_json that also works on a pre-0.2.0 schema."""
     return f"{alias}.quality_json" if has_column(con, "chunks", "quality_json") else "NULL AS quality_json"

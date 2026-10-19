@@ -6,6 +6,10 @@ Safety (guardrails G1.3/G1.4):
   (AutomationSecurity = msoAutomationSecurityForceDisable).
 - Files are opened read-only, never saved, links not updated, a dummy password
   is supplied so protected files fail instead of prompting.
+- A .doc is read by saving a .docx copy into ``logs/doc_copy/`` (a G1.2 location checked by safeio;
+  never next to the original, G1.1), deleted after reading, and reading that copy with the Word reader (word.py), so tracked changes,
+  exponents, Symbol-font characters, equations, numbering and tables survive. The Office-free parser
+  (ole_native) is the fallback.
 - Each file has a timeout; on hang the worker and its Office process are killed.
 """
 
@@ -20,6 +24,7 @@ from .base import Chunk, Extractor, ExtractResult, clean
 
 FORCE_DISABLE_MACROS = 3
 DUMMY_PASSWORD = "erla-no-password"
+WD_FORMAT_DOCX = 16          # wdFormatDocumentDefault: macro-free .docx
 PARA_WINDOW_CHARS = 6000
 
 
@@ -53,6 +58,19 @@ def _word_extract(app, path: str) -> dict:
     finally:
         doc.Close(SaveChanges=0)
     return {"chunks": para_windows(text), "meta": {"title": props.get("Title"), "authors": props.get("Author")}}
+
+
+def _word_to_docx(app, path: str, out: str) -> dict:
+    """Save a .docx copy of ``path`` at ``out`` (a temporary folder). The original is opened read-only
+    and closed unsaved; the copy is macro-free."""
+    doc = app.Documents.Open(FileName=path, ConfirmConversions=False, ReadOnly=True,
+                             AddToRecentFiles=False, PasswordDocument=DUMMY_PASSWORD,
+                             Revert=False, Visible=False, NoEncodingDialog=True)
+    try:
+        doc.SaveAs2(FileName=out, FileFormat=WD_FORMAT_DOCX, AddToRecentFiles=False)
+    finally:
+        doc.Close(SaveChanges=0)
+    return {"docx": out}
 
 
 def para_windows(text: str) -> list[tuple[str, str]]:
@@ -141,7 +159,10 @@ def _worker(kind: str, conn) -> None:
             if msg is None:
                 break
             try:
-                data = _word_extract(app, msg) if kind == "word" else _ppt_extract(app, msg)
+                if isinstance(msg, tuple) and kind == "word":       # ("docx", source, temporary copy)
+                    data = _word_to_docx(app, msg[1], msg[2])
+                else:
+                    data = _word_extract(app, str(msg)) if kind == "word" else _ppt_extract(app, str(msg))
                 conn.send(("ok", data))
             except Exception as exc:
                 conn.send(("err", str(exc)[:500]))
@@ -191,10 +212,11 @@ class ComWorker:
                 pass
         self.kill()
 
-    def run(self, path: Path) -> tuple[str, object]:
+    def run(self, path: Path | tuple[str, str, str]) -> tuple[str, object]:
+        """Extract the text of ``path``, or for ``("docx", source, out)`` save a .docx copy at ``out``."""
         if self.proc is None or not self.proc.is_alive():
             self._start()
-        self.conn.send(str(path))
+        self.conn.send(path if isinstance(path, tuple) else str(path))
         if not self.conn.poll(self.timeout_s):
             self.kill()
             return "err", f"timeout after {self.timeout_s}s"
@@ -254,9 +276,57 @@ class _ComExtractor(Extractor):
             self.worker.close()
 
 
+def _sweep(cfg, folder: Path, age_s: float = 600) -> None:
+    """Remove copies and Word's ``~WRD*.tmp`` files that a killed save left in the copy folder; recent
+    ones may belong to a save still running."""
+    from .. import safeio
+    now = time.time()
+    for f in folder.iterdir():
+        try:
+            if f.is_file() and now - f.stat().st_mtime > age_s:
+                safeio.unlink_at(safeio.check(cfg, f))
+        except OSError:
+            pass                                # still open in a Word that has not exited yet
+
+
 class DocExtractor(_ComExtractor):
+    """Word through COM: a temporary .docx copy read by the Word reader (word.py); without Word, or
+    when the copy fails, the Office-free parser. ``meta['com_error']`` keeps a failed copy's reason
+    (the indexer's circuit breaker counts its timeouts)."""
     exts = ("doc",)
     kind = "word"
+    version = "doc-2"
+
+    def extract(self, path: Path) -> ExtractResult:
+        if self.worker is None or self.cfg is None:   # no Word, or no site to hold the copy: as before
+            return super().extract(path)
+        import uuid
+
+        from .. import safeio
+        from .word import DocxExtractor
+        folder = safeio.mkdir_at(safeio.check(self.cfg, self.cfg.log_dir / "doc_copy"))
+        out = safeio.check(self.cfg, folder / f"{uuid.uuid4().hex}.docx")
+        try:
+            tag, data = self.worker.run(("docx", str(Path(path).resolve()), str(out)))
+            if tag == "ok" and out.is_file():
+                res = DocxExtractor(self.cfg).extract(out)
+                if res.status == "ok":
+                    res.meta["parser"] = "word-com-docx"
+                    return res
+                data = res.error or "Word copy has no text"     # the Office-free parser may still read it
+            com_error = str(data)[:300]
+        finally:
+            safeio.unlink_at(out)
+            _sweep(self.cfg, folder)
+        worker, self.worker = self.worker, None          # fallback: the Office-free parser only
+        try:
+            res = super().extract(path)
+        finally:
+            self.worker = worker
+        res.meta["com_error"] = com_error
+        if res.status == "failed":
+            res.error = f"{res.error}; com: {com_error}"
+        return res
 
 
 class PptExtractor(_ComExtractor):

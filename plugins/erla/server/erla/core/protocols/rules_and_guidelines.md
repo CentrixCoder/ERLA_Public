@@ -33,6 +33,8 @@ Data-quality flags (set by the toolkit on chunks and property records; shown by 
 | `CONTEXT_FILLED` | a column condition (spec, form, temper) was copied across a merged header, not printed above the value | downgrade one level unless the column attribution is confirmed at the locator |
 | `POSSIBLE_SPAN` | single value in a multi-column row; it may apply to all columns | downgrade one level unless confirmed at the locator |
 | `GLYPH_MAPPED` | a symbol-font character was read as another (e.g. `#` → `≤` in a thickness range) | downgrade one level unless confirmed at the locator |
+| Word tracked changes (`!!` line) | the value is in a Word document that holds unaccepted revisions; the text is shown with them accepted | report the warning with the value; downgrade one level unless the user confirms the revision is the issued one |
+| Unreadable symbol or equation object (`!!` line) | a symbol-font character (shown as U+FFFD) or an old equation object could not be read as text | not a design value when the symbol or equation is part of it; rate LOW and mark `VERIFY` until read in Word |
 | `BASIS_FROM_LABEL`, `BASIS_FOOTNOTE`, `FOOTNOTE` | basis taken from the row label, or a footnote may change the basis or condition | read the footnote at the locator; report it with the value |
 | `OCR_LOW_CONF`, `OCR_CONFUSION` | OCR word confidence below threshold, or a letter/digit confusion (`7O75`, `1l.5`) | not a design value until read visually at its page; rate LOW and mark `VERIFY` |
 | `RANGE` | value outside the plausible range for its quantity and unit (lost decimal point, missing multiplier, mis-attributed cell) | not a design value until read visually; rate LOW and mark `VERIFY` |
@@ -102,6 +104,8 @@ Verdict: PASS | PASS WITH FINDINGS | FAIL (after <n> rework rounds) | NOT RUN (<
 ### Citations
 [S1] Author/Org, *Title*, edition/rev, year, locator. Path: <local path> | URL: <url> (retrieved YYYY-MM-DD)
 ```
+
+EPUB: locator = the printed page `p.<n>` when the book has a page-list, else `item <n> §<heading>` (spine position and section heading); add the ISBN when known.
 
 Short lookups (single value, user asks for brevity) may use sections A, B, Citations only. Section G is required when the check policy applies (instructions W9): under `auto` a packet that reports a COMPUTED value, applies a discipline skill, or gives a design value, margin or allowable; under `always` every packet; under `off` none (state "G. NOT RUN (check policy off)" when a computed or design value is reported).
 

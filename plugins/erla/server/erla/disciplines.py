@@ -30,10 +30,10 @@ def skills() -> dict[str, dict[str, Any]]:
     return {k: s for k, s in SPECIALISTS.items() if s.get("skill")}
 
 
-def info() -> dict[str, dict[str, str]]:
+def info() -> dict[str, dict[str, str | None]]:
     """``site_info.disciplines``: what an installed discipline offers and where its knowledge is read."""
     return {k: {"skill": f"erla:{s['skill']}", "file": s["skills"],
-                "index": f"erla://protocols/{Path(s['skills']).stem}/index", "calc_tool": s["tool"]}
+                "index": f"erla://protocols/{Path(s['skills']).stem}/index", "calc_tool": s.get("tool")}
             for k, s in installed().items() if s.get("skill")}
 
 
@@ -64,8 +64,10 @@ def skill_md(spec: dict[str, Any], path: Path, version: str) -> str:
         "Result Packet and report each item PASS / FINDING / N/A.",
         f"3. Fetch only the skills, workflows and lessons the task needs: "
         f"`protocol_section(file=\"{stem}\", key=\"{ids}-S8\")`, or a section number such as \"5\".",
-        f"4. Calculations go through `{spec['tool']}`; report each computed number with its `calc_id` and "
-        "output name and check it with `verify_packet`.",
+        (f"4. Calculations go through `{spec['tool']}`; report each computed number with its `calc_id` and "
+         "output name and check it with `verify_packet`." if spec.get("tool") else
+         "4. This discipline has no calculation tool: cite every technical claim to its source and check "
+         "quoted values with `verify_packet`."),
         "",
     ]
     body = "\n".join(front + use) + "\n" + index(path) + f"\n## {ids}-S0 checklist (in full)\n" + str(s0["text"]) + "\n"

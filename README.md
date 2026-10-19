@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.3-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.5.7-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,21 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.5.7
+
+- **EPUB books** are now indexed, opened at a page or section and verified like PDFs. Books with a printed page
+  list are cited by page (`p.69`); others by section. Tables in a book feed the material-property search.
+  DRM-protected books are reported and never decrypted: use a DRM-free copy.
+- **Word documents are read as Word shows them.** Values inside tracked changes are kept (with a warning that
+  the document is not final), `10³` is read as `10^3` instead of `103`, Greek letters and ± typed in the Symbol
+  font are read correctly (`25 μm` was read as `25 mm`), and equations, content controls, check boxes,
+  numbered headings and clauses, table captions, footnotes, headers and footers are all indexed.
+- **Old `.doc` files** are read through Microsoft Word when it is installed, with the same accuracy; without Word,
+  the built-in reader still reads them as before.
+- A locator now opens only what it names: `p.6` never opens `p.60`.
+- After you update, the first refresh re-reads your Word files once. A very large `.doc` that Word cannot open
+  waits for one timeout and is then read by the built-in reader.
+
 ### 0.5.3
 
 In short: the control panel finds your KPI dashboard for you.
@@ -31,17 +46,6 @@ In short: ERLA's checker keeps up with new Claude models, and tells you when it 
 - **Measured before trusted.** Every check records the exact model it ran on. Until that model has passed
   ERLA's checker test (at least 90% of planted errors caught, at most 10% false alarms), the answer's
   section G says "checker model not yet calibrated" and ERLA's protocol status lists it.
-
-### 0.5.1
-
-In short: ERLA never forces an answer.
-- **When ERLA and its checker disagree.** The Professor now runs on Claude Opus 5.5. If its result and
-  ERLA's still differ by 5% or more, or reach opposite conclusions, after ERLA has fixed what the sources
-  support, the check is repeated once on Claude Fable. If they still do not agree, ERLA stops and answers
-  "UNRESOLVED - no solution can be established from the available sources", with both results and what
-  is missing. Such an answer cannot be logged or exported as a solution.
-- **New rule G3.7:** neither ERLA nor its checker ever produces, adjusts or chooses a value or conclusion
-  to satisfy a request or to make two results agree.
 
 <!-- release-notes:end -->
 

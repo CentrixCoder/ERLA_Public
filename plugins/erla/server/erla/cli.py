@@ -430,10 +430,20 @@ def _quality_lines(qj) -> list[str]:
         out.append("OCR_LOW_CONF numbers: " + ", ".join(q["low_conf_numbers"][:20]))
     if q.get("ocr_confusions"):
         out.append("OCR_CONFUSION tokens (letter/digit): " + ", ".join(q["ocr_confusions"][:20]))
+    out += [str(w) for w in q.get("warnings") or []]          # extraction warnings (EPUB, 0.5.6)
     t = q.get("table") or {}
     if t:
         out.append(f"table extracted ({t.get('method', 'ruled')}, {t.get('rows')}x{t.get('cols')}) - "
                    f"structure is reconstructed; check row/column alignment against the page")
+    w = q.get("docx") or {}
+    if w.get("tracked_changes"):
+        out.append("Word tracked changes: text shown with revisions accepted (insertions kept, deletions "
+                   "dropped) - the document is not final; confirm the value against the issued revision")
+    if w.get("ole_equations"):
+        out.append(f"{w['ole_equations']} equation object(s) (Equation Editor / MathType) not readable as "
+                   f"text - open the file to read them")
+    if w.get("unmapped_symbols"):
+        out.append("symbol-font characters not mapped (shown as �): " + ", ".join(w["unmapped_symbols"][:20]))
     return out
 
 
@@ -540,9 +550,8 @@ def cmd_show(a) -> int:
     rows = con.execute(f"SELECT seq, locator, text, {quality_expr(con, 'chunks')} FROM chunks WHERE doc_id=? ORDER BY seq",
                        (a.doc_id,)).fetchall()
     if a.locator:
-        want = a.locator.lower().strip()
-        sel = [r for r in rows if r["locator"].lower() == want] or \
-              [r for r in rows if r["locator"].lower().startswith(want)]
+        from .store import at_locator
+        sel = at_locator(rows, a.locator)
         if not sel:
             _out(f"locator '{a.locator}' not found. Available: {', '.join(r['locator'] for r in rows[:60])}")
             return 1

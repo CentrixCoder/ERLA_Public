@@ -117,6 +117,18 @@ class OcrConfig:
     low_conf_numeric: float = 80.0   # A5: numeric OCR tokens below this word confidence are flagged
 
 
+# Formats ERLA learned to read after sites were set up. A site's include_ext lists the formats of the
+# release that created it, so these are added on every site (0.5.6: EPUB); opt out with an exclude glob
+# such as "**/*.epub".
+ADDED_EXT = frozenset({"epub"})
+
+
+def include_extensions(listed: Any) -> set[str]:
+    """A site's include_ext plus ADDED_EXT (an empty list stays empty: validate_config reports it)."""
+    exts = {str(e).lower().lstrip(".") for e in (listed or [])}
+    return exts | ADDED_EXT if exts else exts
+
+
 @dataclass
 class Config:
     library_roots: list[Path]
@@ -214,7 +226,7 @@ def load_config(path: Path | str | None = None, validate: bool = True) -> Config
         out_dir=_path(raw.get("out_dir", agent_root / "out"), "out_dir"),
         log_dir=_path(raw.get("log_dir", agent_root / "logs"), "log_dir"),
         web_cache_dir=_path(raw.get("web_cache_dir", agent_root / "web_cache"), "web_cache_dir"),
-        include_ext={str(e).lower().lstrip(".") for e in raw.get("include_ext", [])},
+        include_ext=include_extensions(raw.get("include_ext")),
         exclude_globs=[str(g) for g in raw.get("exclude_globs", [])],
         max_file_mb=float(raw.get("max_file_mb", 500)),
         large_library_gb=float(raw.get("large_library_gb", 50)),

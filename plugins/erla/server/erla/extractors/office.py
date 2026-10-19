@@ -1,4 +1,4 @@
-"""Modern Office extractors (DOCX, XLSX/XLSM, PPTX) and legacy XLS via xlrd.
+"""Modern Office extractors (XLSX/XLSM, PPTX) and legacy XLS via xlrd (DOCX: word.py).
 
 All open files read-only; macros are never executed (openpyxl and xlrd do not
 run VBA; python-docx/pptx only parse XML).
@@ -8,65 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import Chunk, Extractor, ExtractResult, clean, col_letter, rows_to_markdown, split_long
+from .base import Chunk, Extractor, ExtractResult, clean, col_letter, rows_to_markdown
 
 ROW_BLOCK = 200
-
-
-# --------------------------------------------------------------------- DOCX
-class DocxExtractor(Extractor):
-    exts = ("docx",)
-
-    def extract(self, path: Path) -> ExtractResult:
-        import docx
-
-        try:
-            d = docx.Document(str(path))
-        except Exception as exc:
-            return ExtractResult(status="failed", error=f"open: {exc}")
-        res = ExtractResult()
-        cp = d.core_properties
-        res.meta = {
-            "title": (cp.title or "").strip() or None,
-            "authors": (cp.author or "").strip() or None,
-            "year": cp.created.year if cp.created else None,
-        }
-        heading_path: list[str] = []
-        buf: list[str] = []
-
-        def flush():
-            text = clean("\n".join(buf))
-            if text:
-                loc = "§" + (" > ".join(heading_path) if heading_path else "body")
-                for j, piece in enumerate(split_long(text)):
-                    res.chunks.append(Chunk(loc if j == 0 else f"{loc} part {j + 1}", piece))
-            buf.clear()
-
-        for para in d.paragraphs:
-            style = (para.style.name if para.style is not None else "") or ""
-            text = para.text.strip()
-            if style.lower().startswith("heading") and text:
-                flush()
-                try:
-                    level = int(style.split()[-1])
-                except ValueError:
-                    level = 1
-                heading_path[:] = heading_path[: level - 1] + [text[:80]]
-            elif text:
-                buf.append(text)
-        flush()
-        for t_i, table in enumerate(d.tables, 1):
-            try:
-                rows = [[c.text for c in r.cells] for r in table.rows]
-            except Exception:
-                continue
-            md = rows_to_markdown(rows)
-            if md:
-                res.chunks.append(Chunk(f"table {t_i}", md, has_table=True))
-        if not res.meta["title"] and d.paragraphs:
-            res.meta["title_guess"] = next((p.text.strip()[:200] for p in d.paragraphs if p.text.strip()), None)
-        res.status = "ok" if res.chunks else "empty"
-        return res
 
 
 # ------------------------------------------------------------- sheet helper
