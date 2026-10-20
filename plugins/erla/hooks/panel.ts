@@ -127,6 +127,16 @@ export function acceptBlock(tool: string, input: unknown): string | null {
 
 const TOOL_STATES = ['draft', 'tested', 'accepted', 'modified'] as const
 
+// the browser opener the server names for its OS (erla/engtools.py open_argv), kept only in a known shape
+// and only for the tool's own address: the desktop app's Link opens https addresses, not http://127.0.0.1
+const OPENERS = [['rundll32.exe', 'url.dll,FileProtocolHandler'], ['open'], ['xdg-open']]
+export function openerFrom(raw: unknown, url: string | null): string[] | null {
+  if (!url || !Array.isArray(raw) || !raw.every(a => typeof a === 'string')) return null
+  const argv = raw as string[]
+  const known = OPENERS.some(o => argv.length === o.length + 1 && o.every((a, i) => argv[i] === a))
+  return known && argv[argv.length - 1] === url ? argv : null
+}
+
 // engtools_list's JSON -> the tools the card lists; rows it cannot read are left out
 export function toolsFrom(raw: unknown): EngTool[] {
   const list = raw && typeof raw === 'object' ? (raw as { tools?: unknown }).tools : null
@@ -139,9 +149,10 @@ export function toolsFrom(raw: unknown): EngTool[] {
     if (!t || typeof t.id !== 'string' || !state) continue
     const last = t.last_test as { ok?: unknown; at?: unknown } | null | undefined
     const argv = t.accept_argv
+    const url = typeof t.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/$/.test(t.url) ? t.url : null
     out.push({
       id: t.id, name: str(m.name) || t.id, version: str(m.version), summary: str(m.summary), state,
-      running: t.running === true, url: typeof t.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\//.test(t.url) ? t.url : null,
+      running: t.running === true, url, openArgv: openerFrom(t.open_argv, url),
       lastTest: last ? { ok: last.ok === true, at: typeof last.at === 'string' ? last.at : null } : null,
       canAccept: t.can_accept === true,
       acceptArgv: Array.isArray(argv) && argv.length > 0 && argv.every(a => typeof a === 'string') ? argv as string[] : null,

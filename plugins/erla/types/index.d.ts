@@ -113,6 +113,8 @@ export type EngTool = {
   canAccept: boolean
   // the command the Accept button runs on this computer (never an MCP tool: ET3)
   acceptArgv: string[] | null
+  // the command Open in browser runs: the server's opener for its OS, aimed at `url` only
+  openArgv: string[] | null
   limits: string[]
 }
 
@@ -141,6 +143,8 @@ export type PanelView = {
   // the server offers Engineer Tools (site_info engineer_tools; the full edition) and its list, once read
   engineerTools: boolean
   tools: EngTool[] | null
+  // why the last engtools_list failed (a refused call names the rule to add), shown in the card; null after a read
+  toolsError: string | null
   // the tool whose Accept was pressed once: a second press accepts it (the user's decision, ET3)
   confirmAccept: string | null
   busy: string | null

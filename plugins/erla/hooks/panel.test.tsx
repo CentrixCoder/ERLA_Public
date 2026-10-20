@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import {
-  acceptBlock, toolBadge, toolsFrom, artifactsFrom, askPrompt, buttonLook, CARD_COLOR, checkPolicyLines, FLASH_MS, pressedVariant, SAME_COLOR, dashboardLink, onlyDashboard, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
+  acceptBlock, openerFrom, toolBadge, toolsFrom,artifactsFrom, askPrompt, buttonLook, CARD_COLOR, checkPolicyLines, FLASH_MS, pressedVariant, SAME_COLOR, dashboardLink, onlyDashboard, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
   rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
@@ -840,6 +840,20 @@ test('Engineer Tools helpers: rows read safely, badges, and only the user accept
   expect(rows[2]?.url).toBe(null)
   expect(rows[3]?.acceptArgv).toBe(null)
   expect(toolsFrom('nonsense')).toEqual([])
+
+  // the browser opener: one of the three known commands, aimed at the tool's own address, else none
+  const URL1 = 'http://127.0.0.1:8050/'
+  const WIN = ['rundll32.exe', 'url.dll,FileProtocolHandler', URL1]
+  expect(openerFrom(WIN, URL1)).toEqual(WIN)
+  expect(openerFrom(['open', URL1], URL1)).toEqual(['open', URL1])
+  expect(openerFrom(['xdg-open', URL1], URL1)).toEqual(['xdg-open', URL1])
+  expect(openerFrom(WIN, null)).toBe(null)                                         // not running
+  expect(openerFrom(['rundll32.exe', 'url.dll,FileProtocolHandler', 'http://evil.example/'], URL1)).toBe(null)
+  expect(openerFrom(['cmd.exe', '/c', 'start', URL1], URL1)).toBe(null)            // a shell is never run
+  expect(openerFrom(['open', '-a', 'Terminal', URL1], URL1)).toBe(null)
+  expect(openerFrom([1, URL1], URL1)).toBe(null)
+  expect(toolsFrom({ tools: [tool('beam', 'accepted', { running: true, url: URL1, open_argv: WIN })] })[0]?.openArgv).toEqual(WIN)
+  expect(toolsFrom({ tools: [tool('beam', 'accepted', { running: true, url: 'http://0.0.0.0:8050/', open_argv: ['open', 'http://0.0.0.0:8050/'] })] })[0]?.openArgv).toBe(null)
   expect(toolBadge({ state: 'modified', running: false }).color).toBe('error')
   expect(toolBadge({ state: 'tested', running: false }).text).toMatch(/awaiting your acceptance/)
 
@@ -955,6 +969,78 @@ test('Engineer Tools: a refused accept and a surface without commands are both s
   await ui.press({ key: 'tool-accept-beam' })
   await rec.clock.settle()
   expect(await ui.find({ type: 'Text', text: /cannot run commands.*erla tools accept beam/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// 2026-10-20: settings had no allow rule for engtools_list; the card said "Reading your tools…" for good
+// while the refusal sat in the panel's message line. The card must say it and name the rule.
+test('Engineer Tools: a refused list is said in the card with the rule to add, then Refresh list recovers', async ($, on) => {
+  const rec = fake(on)
+  rec.tools = { tools: [tool('beam', 'tested')] }
+  rec.refuse = 'engtools_list'
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /add the permission rule mcp__plugin_erla_erla__engtools_list/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Reading your tools…$/ })).toBeUndefined()   // the old card's endless state
+
+  await ui.press({ key: 'tools-refresh' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'tools-refresh', text: /Failed/ })).toBeDefined()
+
+  rec.refuse = ''                                                // the user added the rule
+  await rec.clock.advance(FLASH_MS)
+  await ui.press({ key: 'tools-refresh' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^I-beam Timoshenko analyzer$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /blocked ERLA's engtools_list/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+// 2026-10-20: the running tool's card had only a Link to http://127.0.0.1:8050/, which the desktop app does
+// not open (its links open https addresses), so the user could not reach the tool's UI at all
+test('Engineer Tools: a running tool opens in the browser through the server\'s opener, and says a failure', async ($, on) => {
+  const rec = fake(on)
+  const url = 'http://127.0.0.1:8050/'
+  const opener = ['rundll32.exe', 'url.dll,FileProtocolHandler', url]
+  rec.tools = { tools: [tool('beam', 'accepted', { running: true, url, open_argv: opener })] }
+  rec.runOut = { exitCode: 0, stdout: '', stderr: '' }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'tool-open-beam' })).toBeUndefined()      // already running
+  expect(await ui.find({ type: 'Button', key: 'tool-copy-beam' })).toBeDefined()
+
+  await ui.press({ key: 'tool-browse-beam' })
+  await rec.clock.settle()
+  expect(rec.runs).toEqual([opener])
+  expect(await ui.find({ type: 'Text', text: /opened in your browser at http:\/\/127\.0\.0\.1:8050\// })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'tool-browse-beam', text: /Opened/ })).toBeDefined()
+
+  // a surface that runs no commands: said, with the address to open by hand (L10)
+  rec.runFails = true
+  await rec.clock.advance(FLASH_MS)
+  await ui.press({ key: 'tool-browse-beam' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Could not open your browser .*open http:\/\/127\.0\.0\.1:8050\/ yourself/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'tool-browse-beam', text: /Failed/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('Engineer Tools: an opener the panel does not know is never run', async ($, on) => {
+  const rec = fake(on)
+  const url = 'http://127.0.0.1:8050/'
+  rec.tools = { tools: [tool('beam', 'accepted', { running: true, url, open_argv: ['cmd.exe', '/c', 'start', url] })] }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+  await ui.press({ key: 'tool-browse-beam' })
+  await rec.clock.settle()
+  expect(rec.runs).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /did not say how to open a browser here/ })).toBeDefined()
   await ui.unmount()
 })
 

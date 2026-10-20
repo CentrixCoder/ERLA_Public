@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.9-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.5.10-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,10 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.5.10
+
+- Maintenance release: no change to the free edition.
+
 ### 0.5.9
 
 - **Word and PowerPoint files.** When ERLA reads an Office file it now closes only the Word or PowerPoint it
@@ -29,21 +33,6 @@ Updated automatically at every release; older versions are listed under
 - While an action runs, buttons that would have to wait are dimmed, and pressing one tells you what is running
   instead of doing nothing. A button's label turns bold and underlined under the pointer.
 - Each card has its own outline colour, readable in light and dark themes.
-
-### 0.5.7
-
-- **EPUB books** are now indexed, opened at a page or section and verified like PDFs. Books with a printed page
-  list are cited by page (`p.69`); others by section. Tables in a book feed the material-property search.
-  DRM-protected books are reported and never decrypted: use a DRM-free copy.
-- **Word documents are read as Word shows them.** Values inside tracked changes are kept (with a warning that
-  the document is not final), `10³` is read as `10^3` instead of `103`, Greek letters and ± typed in the Symbol
-  font are read correctly (`25 μm` was read as `25 mm`), and equations, content controls, check boxes,
-  numbered headings and clauses, table captions, footnotes, headers and footers are all indexed.
-- **Old `.doc` files** are read through Microsoft Word when it is installed, with the same accuracy; without Word,
-  the built-in reader still reads them as before.
-- A locator now opens only what it names: `p.6` never opens `p.60`.
-- After you update, the first refresh re-reads your Word files once. A very large `.doc` that Word cannot open
-  waits for one timeout and is then read by the built-in reader.
 
 <!-- release-notes:end -->
 

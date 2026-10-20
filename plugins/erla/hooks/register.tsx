@@ -568,6 +568,7 @@ const PANEL_EMPTY: PanelView = {
   dashboardChoices: null,
   engineerTools: false,
   tools: null,
+  toolsError: null,
   confirmAccept: null,
   busy: null,
   message: null,
@@ -631,7 +632,7 @@ async function press(
     await say($, err instanceof Error ? err.message : String(err), true)
   }
   const view = (await read($, panel)) ?? PANEL_EMPTY
-  const failed = Boolean((opts.library ? (await read($, library))?.message : view.message)?.isError)
+  const failed = outcome === 'Failed' || Boolean((opts.library ? (await read($, library))?.message : view.message)?.isError)
   const text = outcome || (failed ? (view.setup ? 'Not ready' : 'Failed') : 'Done')
   await setPanel($, { pressed: { key, phase: failed ? 'failed' : 'done', text, seq } })
   $.clock.after(FLASH_MS, () => {
@@ -823,11 +824,13 @@ function exportReferences($: EngineInterface): Promise<string | void> {
 // files); Accept runs `erla tools accept` on this computer after a confirming second press, since no MCP
 // tool may accept (ET3).
 
+// a failed read is said in the card itself: on 2026-10-20 a refused engtools_list (no allow rule) left the
+// card at "Reading your tools…" while the error sat in the panel's message line, out of sight
 async function refreshTools($: EngineInterface): Promise<void> {
   try {
-    await setPanel($, { tools: toolsFrom(await call<unknown>($, 'engtools_list')) })
+    await setPanel($, { tools: toolsFrom(await call<unknown>($, 'engtools_list')), toolsError: null })
   } catch (err) {
-    await say($, explain('engtools_list', err), true)
+    await setPanel($, { toolsError: explain('engtools_list', err) })
   }
 }
 
@@ -908,6 +911,31 @@ async function acceptTool($: EngineInterface, t: EngTool): Promise<string | void
     await say($, `${t.name} ${t.version} accepted: press Open to start it.`)
     return 'Accepted'
   })
+}
+
+// 2026-10-20: the card's Link to http://127.0.0.1:8050/ opened nothing in the desktop app (its links open
+// https addresses only), so the button runs the server's browser opener on this computer
+async function openInBrowser($: EngineInterface, t: EngTool): Promise<string | void> {
+  if (!t.openArgv || !t.url) {
+    await say($, `This ERLA server did not say how to open a browser here: copy the link and open ${t.url ?? 'it'} in your browser.`, true)
+    return
+  }
+  try {
+    const out = await $.process.run(t.openArgv, { timeoutMs: 15_000 })
+    if (out.exitCode !== 0) throw new Error(`${t.openArgv[0]} exit code ${out.exitCode}${out.stderr.trim() ? `: ${out.stderr.trim()}` : ''}`)
+  } catch (err) {
+    // L10: never a silent fallback; the address is in the card to copy
+    await say($, `Could not open your browser (${err instanceof Error ? err.message : String(err)}): copy the link and open ${t.url} yourself.`, true)
+    return
+  }
+  await say($, `${t.name} opened in your browser at ${t.url} (on this computer only).`)
+  return 'Opened'
+}
+
+async function copyToolLink($: EngineInterface, t: EngTool, surface: Parameters<EngineInterface['ui']['copy']>[0]['surface']): Promise<string> {
+  const res = await $.ui.copy({ text: t.url ?? '', surface })
+  await say($, res.isCopied ? `${t.name} link copied: paste it in your browser.` : `Could not copy the link here: open ${t.url} in your browser.`, !res.isCopied)
+  return res.isCopied ? 'Copied' : 'Not copied'
 }
 
 function registerPanel(on: Parameters<Register>[0]): void {
@@ -1069,8 +1097,11 @@ function registerPanel(on: Parameters<Register>[0]): void {
 
         {v.engineerTools
           ? card('tools', `Engineer Tools${v.tools ? ` (${v.tools.length})` : ''}`, ACCENT.tools,
+            v.toolsError
+              ? <Text key="tools-error" color="error">{v.toolsError}</Text>
+              : null,
             !v.tools
-              ? <Text key="tools-none" color="subtle">Reading your tools…</Text>
+              ? v.toolsError ? null : <Text key="tools-none" color="subtle">Reading your tools…</Text>
               : v.tools.length === 0
                 ? <Text key="tools-none" color="subtle">No tools yet. Ask ERLA to build a program for an analysis; once it is registered (erla tools add {'<folder>'}) it is listed here.</Text>
                 : null,
@@ -1085,10 +1116,16 @@ function registerPanel(on: Parameters<Register>[0]): void {
                   </Box>
                   {t.summary ? <Text color="subtle">{t.summary}</Text> : null}
                   {t.limits.length ? <Text color="subtle" wrap="truncate-end">{`Limits: ${t.limits.join('; ')}`}</Text> : null}
-                  {t.running && t.url ? <Text bold><Link href={t.url}>{`Open ${t.name} ↗`}</Link></Text> : null}
+                  {t.running && t.url ? <Text color="subtle"><Link href={t.url}>{t.url}</Link></Text> : null}
                   <Box gap={1}>
                     {t.state === 'accepted' && !t.running
                       ? button(`tool-open-${t.id}`, 'Open', 'primary', () => void press($, `tool-open-${t.id}`, 'Starting…', () => toolAction($, t, 'start')), { scope: 'tool-open' })
+                      : null}
+                    {t.running && t.url
+                      ? button(`tool-browse-${t.id}`, 'Open in browser', 'primary', () => void press($, `tool-browse-${t.id}`, 'Opening…', () => openInBrowser($, t), { waits: false }), { scope: 'tool-browse', waits: false })
+                      : null}
+                    {t.running && t.url
+                      ? button(`tool-copy-${t.id}`, 'Copy link', 'secondary', e => void press($, `tool-copy-${t.id}`, 'Copying…', () => copyToolLink($, t, e.surface), { waits: false }), { scope: 'tool-copy', waits: false })
                       : null}
                     {t.running
                       ? button(`tool-stop-${t.id}`, 'Stop', 'secondary', () => void press($, `tool-stop-${t.id}`, 'Stopping…', () => toolAction($, t, 'stop')), { scope: 'tool-stop' })
@@ -1107,7 +1144,7 @@ function registerPanel(on: Parameters<Register>[0]): void {
             <Box key="tools-actions" gap={1} marginTop={1}>
               {button('tools-refresh', 'Refresh list', 'secondary', () => void press($, 'tools-refresh', 'Reading…', async () => {
                 await panelAct($, 'Reading your tools…', () => refreshTools($))
-                return (await read($, panel))?.message?.isError ? undefined : 'Updated'
+                return (await read($, panel))?.toolsError ? 'Failed' : 'Updated'
               }))}
             </Box>,
           )
