@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.10-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,13 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.6.0
+
+- **Old Word (`.doc`) files are read completely again.** When Word was slow to respond, ERLA read some `.doc`
+  files without it and meant to try Word again on the next refresh, but kept serving the first reading, so the
+  index stayed "out of date". The next refresh now gives those files to Word.
+- The index remembers when each document was first added, even after a full re-index.
+
 ### 0.5.10
 
 - Maintenance release: no change to the free edition.
@@ -25,14 +32,6 @@ Updated automatically at every release; older versions are listed under
 - **Word and PowerPoint files.** When ERLA reads an Office file it now closes only the Word or PowerPoint it
   started itself. A Word you opened at the same moment is no longer closed, and a busy Office start is retried.
 - The free edition now runs entirely in Python; nothing to install or change.
-
-### 0.5.8
-
-- **The control panel answers every click.** The button you press changes at once: ⏳ and a short word while the
-  action runs, then ✓ or ✗ with the outcome for a moment (`✓ Started`, `✓ 2 found`, `✓ Copied`, `✗ Not ready`).
-- While an action runs, buttons that would have to wait are dimmed, and pressing one tells you what is running
-  instead of doing nothing. A button's label turns bold and underlined under the pointer.
-- Each card has its own outline colour, readable in light and dark themes.
 
 <!-- release-notes:end -->
 

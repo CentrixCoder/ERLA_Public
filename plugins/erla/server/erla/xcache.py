@@ -3,7 +3,8 @@
 Stored in the index database (table `extract_cache`, guardrail G1.2: index file only), keyed by
 (sha256, ext) and stamped with CACHE_VERSION. A re-index of an unchanged file - including
 `erla index --full`, a moved/renamed file, or a rebuilt index - reuses the cached chunks instead of
-starting Word/PowerPoint again. Failed extractions are never cached, so they are retried.
+starting Word/PowerPoint again. Failed extractions and reads that skipped Office for one run
+(``com_skipped``) are never cached, so they are retried.
 Bump CACHE_VERSION whenever a cached extractor's output format changes; an extractor with its own
 ``version`` (DocExtractor) is part of its entries' version, so only that format's entries go stale.
 """
@@ -49,20 +50,29 @@ def _unpack(blob: bytes) -> ExtractResult:
                          error=body.get("error") or "")
 
 
+def _provisional(res: ExtractResult) -> bool:
+    """A read that skipped Office for one run only (indexer circuit breaker): the next run must give the
+    file to Office again, so serving it from the cache would keep it outdated for good."""
+    return bool((res.meta or {}).get("com_skipped"))
+
+
 def get(con, sha: str, ext: str) -> ExtractResult | None:
     row = con.execute("SELECT payload FROM extract_cache WHERE sha256=? AND ext=? AND version=?",
                       (sha, ext, version(ext))).fetchone()
     if not row:
         return None
     try:
-        return _unpack(row[0])
+        res = _unpack(row[0])
     except Exception:            # corrupt entry: drop it and re-extract
+        res = None
+    if res is None or _provisional(res):     # 0.5.10 cached provisional reads: drop them too
         con.execute("DELETE FROM extract_cache WHERE sha256=? AND ext=?", (sha, ext))
         return None
+    return res
 
 
 def put(con, sha: str, ext: str, res: ExtractResult) -> bool:
-    if not sha or res.status not in CACHEABLE_STATUS:
+    if not sha or res.status not in CACHEABLE_STATUS or _provisional(res):
         return False
     con.execute("INSERT OR REPLACE INTO extract_cache(sha256, ext, version, status, payload, created_at) "
                 "VALUES (?,?,?,?,?,?)",

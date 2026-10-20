@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS documents (
     extract_status TEXT,
     extract_error TEXT,
     meta_json TEXT,
-    indexed_at TEXT
+    indexed_at TEXT,
+    added_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_doc_sha ON documents(sha256);
 CREATE INDEX IF NOT EXISTS ix_doc_ext ON documents(ext);
@@ -104,7 +105,11 @@ CREATE TABLE IF NOT EXISTS table_scan (
 );
 """
 
-MIGRATIONS = [("chunks", "quality_json", "ALTER TABLE chunks ADD COLUMN quality_json TEXT")]
+MIGRATIONS = [("chunks", "quality_json", "ALTER TABLE chunks ADD COLUMN quality_json TEXT"),
+              ("documents", "added_at", "ALTER TABLE documents ADD COLUMN added_at TEXT")]
+# added_at: when the document first entered the index; indexed_at moves with every re-read or move.
+# Rows from before the column (or written by an older release after a rollback) stay NULL here and
+# get an estimate from the indexer (indexer.backfill_added), which can stat the file.
 
 
 def connect(path: Path | str, write: bool = False) -> sqlite3.Connection:

@@ -136,6 +136,39 @@ def probe_library(cfg: Config, con) -> dict:
             "stale": bool(reasons), "reasons": reasons}
 
 
+def _created(path: str) -> float | None:
+    """When the file arrived on this disk (stat only, never opened): its creation time where the OS
+    records one, else its modification time."""
+    try:
+        s = os.stat(path)
+    except OSError:
+        return None
+    born = getattr(s, "st_birthtime", None)
+    if born is None:
+        born = s.st_ctime if os.name == "nt" else s.st_mtime   # Windows ctime is creation; Linux has none
+    return born or None
+
+
+def estimated_added(path: str, indexed_at: str | None) -> str | None:
+    """added_at for a record from before the column (or from an older release after a rollback): the
+    file's creation time, never later than indexed_at. indexed_at alone would date every document to
+    the last full re-read."""
+    born = _created(path)
+    if born is None:
+        return indexed_at
+    iso = datetime.fromtimestamp(born, timezone.utc).isoformat(timespec="seconds")
+    return min(iso, indexed_at) if indexed_at else iso
+
+
+def backfill_added(con) -> int:
+    """Give every record without added_at its estimate (writer connections only)."""
+    rows = con.execute("SELECT doc_id, path, indexed_at FROM documents WHERE added_at IS NULL").fetchall()
+    con.executemany("UPDATE documents SET added_at=? WHERE doc_id=?",
+                    [(estimated_added(r["path"], r["indexed_at"]), r["doc_id"]) for r in rows])
+    con.commit()
+    return len(rows)
+
+
 def _extract_job(path_str: str, ext: str, cfg: Config, ocr_now: bool, progress=None) -> ExtractResult:
     """Top-level so it can run in a worker process."""
     cls = EXTRACTORS[ext]
@@ -160,6 +193,7 @@ class Indexer:
                res: ExtractResult, doc_id: int | None) -> int:
         con = self.con
         copies: list[int] = []
+        added = self._added_at(doc_id)
         if doc_id is not None:
             old = con.execute("SELECT sha256 FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
             if old is not None and old["sha256"] == sha:
@@ -184,13 +218,13 @@ class Indexer:
         cur = con.execute(
             """INSERT INTO documents(path, rel_path, sha256, simhash, size, mtime, ext, title, authors, year,
                    doc_type, discipline, standard_id, revision, authority_tier, classification_flag, top_folder,
-                   page_count, ocr_used, ocr_pending, extract_status, extract_error, meta_json, indexed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   page_count, ocr_used, ocr_pending, extract_status, extract_error, meta_json, indexed_at, added_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (str(path), rel, sha, sh, size, mtime, ext, str(title)[:400], meta.get("authors"), year,
              cls["doc_type"], cls["discipline"], std, rev, cls["authority_tier"], flag, cls["top_folder"],
              meta.get("page_count") or meta.get("slide_count"), int(res.ocr_used), int(res.ocr_pending),
              res.status, res.error[:500] if res.error else None, json.dumps(meta, default=str)[:20000],
-             datetime.now(timezone.utc).isoformat(timespec="seconds")))
+             datetime.now(timezone.utc).isoformat(timespec="seconds"), added))
         new_id = cur.lastrowid
         con.executemany("INSERT OR REPLACE INTO duplicates(doc_id, canonical_doc_id, kind) VALUES (?,?,'exact')",
                         [(c, new_id) for c in copies])
@@ -216,8 +250,18 @@ class Indexer:
                         (c.lastrowid, f"{title}\n{rel}", ftitle))
         return new_id
 
+    def _added_at(self, doc_id: int | None) -> str:
+        """When the document first entered the index: kept from the record a re-read replaces, else now."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if doc_id is not None:
+            row = self.con.execute("SELECT added_at, path, indexed_at FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
+            if row is not None:
+                return row["added_at"] or estimated_added(row["path"], row["indexed_at"]) or now
+        return now
+
     def _write_duplicate(self, path: Path, rel: str, size: int, mtime: float, sha: str,
                          canonical: int, doc_id: int | None) -> None:
+        added = self._added_at(doc_id)
         if doc_id is not None:
             store.delete_document(self.con, doc_id)
         # G2.5: a copy of a flagged document is flagged too (its own folder rule first), so its file
@@ -226,10 +270,10 @@ class Indexer:
         flag = self.cfg.path_flag(rel) or (row[0] if row else None)
         cur = self.con.execute(
             """INSERT INTO documents(path, rel_path, sha256, size, mtime, ext, title, classification_flag,
-                                     extract_status, indexed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                                     extract_status, indexed_at, added_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (str(path), rel, sha, size, mtime, path.suffix.lower().lstrip("."), path.stem, flag, "duplicate",
-             datetime.now(timezone.utc).isoformat(timespec="seconds")))
+             datetime.now(timezone.utc).isoformat(timespec="seconds"), added))
         self.con.execute("INSERT OR REPLACE INTO duplicates(doc_id, canonical_doc_id, kind) VALUES (?,?,?)",
                          (cur.lastrowid, canonical, "exact"))
 
@@ -298,6 +342,7 @@ class Indexer:
         t0 = time.time()
         st = IndexStats()
         con = self.con
+        backfill_added(con)
         existing = {r["path"]: r for r in con.execute(
             f"SELECT doc_id, path, size, mtime, sha256, extract_status, {XVER_SQL} AS xver FROM documents")}
         by_sha = {r["sha256"]: r["doc_id"] for r in existing.values()
