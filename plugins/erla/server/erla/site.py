@@ -511,7 +511,7 @@ def review_status(site: Path) -> dict:
             status["overdue"] = date.fromisoformat(m.group(1)) < date.today()
     log = site / "logs" / "protocol_review_log.jsonl"
     if log.is_file():
-        opened, closed = [], set()
+        opened, closed, closes = [], set(), []
         for line in log.read_text(encoding="utf-8").splitlines():
             try:
                 r = json.loads(line)
@@ -521,6 +521,17 @@ def review_status(site: Path) -> dict:
                 opened.append(r)
             elif r.get("type") == "review":
                 closed.add(r.get("ts", ""))
+            elif r.get("type") == "trigger_close":
+                closes.append(r)
         last_review = max(closed) if closed else ""
-        status["open_triggers"] = [t for t in opened if t.get("ts", "") > last_review]
+        status["open_triggers"] = [t for t in opened if t.get("ts", "") > last_review
+                                   and not any(_closes(c, t) for c in closes)]
     return status
+
+
+def _closes(close: dict, trig: dict) -> bool:
+    """A targeted close (2026-10-19): it ends the triggers opened before it whose trigger type, skill file and
+    specialist match each field it names, so a review of one protocol file leaves the other files' triggers open."""
+    if trig.get("ts", "") > close.get("ts", ""):
+        return False
+    return all(trig.get(k) == close[k] for k in ("trigger", "file", "specialist") if close.get(k))

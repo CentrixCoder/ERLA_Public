@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { RenderPropsOf } from 'claude-code'
 
 import {
-  artifactsFrom, askPrompt, buttonLook, CARD_COLOR, checkPolicyLines, FLASH_MS, pressedVariant, SAME_COLOR, dashboardLink, onlyDashboard, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
+  acceptBlock, toolBadge, toolsFrom, artifactsFrom, askPrompt, buttonLook, CARD_COLOR, checkPolicyLines, FLASH_MS, pressedVariant, SAME_COLOR, dashboardLink, onlyDashboard, evalFrom, filesFrom, openPrompt, pageNumber, parseStats, preferencesSection, qualityLine, readSettings, referencesMarkdown,
   rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
@@ -29,6 +29,16 @@ const SHOW = JSON.stringify({
 })
 const SHOW_ITAR = JSON.stringify({
   document: { doc_id: 99, title: 'Fitting allowables', path: 'ITAR/fittings.pdf', authority_tier: 'T1', classification_flag: 'ITAR', year: null },
+})
+
+// one engtools_list row as ERLA's server answers it (erla/engtools.py status())
+const ACCEPT_ARGV = (id: string) => ['C:/ERLA/runtime/python.exe', '-m', 'erla.cli', 'tools', 'accept', id, '--sha', 'abc123', '--by', 'panel']
+const tool = (id: string, state: string, extra: Record<string, unknown> = {}) => ({
+  id, state, hash: 'abc123', running: false, url: null, can_accept: state === 'tested',
+  manifest: { id, name: id === 'beam' ? 'I-beam Timoshenko analyzer' : id, version: '1.0', summary: 'Propped cantilever, Timoshenko',
+    limits: ['no lateral-torsional buckling'], run: ['app.py'], port: 8050 },
+  last_test: { ok: state !== 'draft', at: '2026-10-19T20:00:00+00:00', exit: 0, seconds: 1.4, version: '1.0' },
+  accepted: state === 'accepted' ? { hash: 'abc123' } : null, accept_argv: ACCEPT_ARGV(id), ...extra,
 })
 
 test('helpers: stats, sources, file lists, references, preferences', () => {
@@ -78,7 +88,11 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
     // the erla server is not running (the app reports it disconnected)
     down: false,
     // the Artifact tool's listing text; 'deny' refuses the call, 'missing' rejects it (no such tool)
-    artifacts: '' as string, artifactCalls: [] as Record<string, unknown>[] }
+    artifacts: '' as string, artifactCalls: [] as Record<string, unknown>[],
+    // engtools_list's answer; null = a server without Engineer Tools (the free core edition)
+    tools: null as unknown,
+    // commands the panel ran with $.process.run, what they answer, and whether this surface refuses them
+    runs: [] as string[][], runOut: { exitCode: 0, stdout: '{"ok": true}', stderr: '' }, runFails: false }
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: rec.down ? { isConnected: false, server: 'plugin:erla:erla', message: 'not running' } : { isConnected: true, server: 'plugin:erla:erla' } }))
   on('fs.read', ($, e) => {
@@ -96,7 +110,14 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
     if (e.tool === rec.refuse) return { deny: 'The server-side auto mode classifier gave no verdict' }
     const out: Record<string, unknown> = {
       library_stats: { text: STATS, last_eval: rec.lastEval },
-      site_info: { unit_system: 'US', library_roots: ['D:\\Lib'], erla_version: '0.2.9', check_policy: 'always' },
+      site_info: { unit_system: 'US', library_roots: ['D:\\Lib'], erla_version: '0.2.9', check_policy: 'always',
+        ...(rec.tools !== null ? { engineer_tools: true } : {}) },
+      ...(rec.tools !== null ? {
+        engtools_list: rec.tools,
+        engtools_start: { ok: true, url: 'http://127.0.0.1:8050/' },
+        engtools_stop: { ok: true, stopped: true },
+        engtools_test: { ok: true, test: { ok: true, exit: 0, seconds: 1.4, output: ['8 passed'] } },
+      } : {}),
       index_status: { status: { state: 'done' }, log_tail: [] },
       index_start: { state: 'running' },
       library_files: { inventory: { handbook: [{ doc_id: 1, title: 'Roark', path: 'Roark.pdf', tier: 'T2', flag: null }], spec: [{ doc_id: 2, title: 'Fitting allowables', path: 'ITAR/X.pdf', tier: 'T1', flag: 'ITAR' }] } },
@@ -132,6 +153,11 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
     return { text: e.text }
   })
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude.', scope: 'shared' as const }] }))
+  on('process.run', ($, e) => {
+    rec.runs.push([...e.argv])
+    if (rec.runFails) throw new Error('this surface runs no local commands')
+    return { value: rec.runOut as never }
+  })
   on('store.get', ($, e) => ({ value: rec.store[e.key] }))
   on('store.set', ($, e) => {
     rec.store[e.key] = e.value
@@ -665,7 +691,7 @@ test('card colours: every card its own hue, only theme keys from the typed set',
   expect(new Set(colours).size).toBe(Object.keys(CARD_COLOR).length)
   // a key outside the typed theme set could be drawn however a surface likes
   for (const key of Object.values(CARD_COLOR)) {
-    expect(['warning', 'ide', 'bashBorder', 'claude', 'planMode', 'suggestion', 'merged', 'success']).toContain(key)
+    expect(['warning', 'ide', 'bashBorder', 'claude', 'planMode', 'suggestion', 'merged', 'success', 'promptBorder']).toContain(key)
   }
 })
 
@@ -674,6 +700,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const rec = fake(on)
     rec.stub = 'Installing ERLA 0.5.8: this takes a few minutes.'      // the Setup card is drawn too
     rec.store.settings = { dashboardShown: true }                         // and the KPI dashboard card
+    rec.tools = { tools: [tool('beam', 'accepted')] }                   // and the Engineer Tools card
     await $.session.start({ cwd: '/', surface, isInteractive: true })
     await $.command.run({ command: 'erla', args: '' } as never)
     const ui = await $.ui.mount({ plugin: 'erla', surface, component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
@@ -793,5 +820,154 @@ test('quick presses confirm on their Buttons too: Ask ERLA, Clear list, Export w
   await rec.clock.advance(FLASH_MS)
   expect(await ui.find({ type: 'Button', key: 'clear', text: /^Clear list$/ })).toBeDefined()
   expect(rec.prompts).toHaveLength(1)
+  await ui.unmount()
+})
+
+// ------------------------------------------------------------------ Engineer Tools (ADR-0003)
+const BS = String.fromCharCode(92)
+
+test('Engineer Tools helpers: rows read safely, badges, and only the user accepts (ET3)', () => {
+  const rows = toolsFrom({ tools: [
+    tool('beam', 'tested'),
+    tool('lug', 'accepted', { running: true, url: 'http://127.0.0.1:8051/' }),
+    tool('evil', 'accepted', { running: true, url: 'http://0.0.0.0:8052/' }),     // never a link off this computer
+    { id: 'x', state: 'unknown' },                                                  // a row it cannot read
+    tool('odd', 'draft', { accept_argv: [1, 2] }),
+  ] })
+  expect(rows.map(r => r.id)).toEqual(['beam', 'lug', 'evil', 'odd'])
+  expect(rows[0]).toMatchObject({ name: 'I-beam Timoshenko analyzer', version: '1.0', canAccept: true, acceptArgv: ACCEPT_ARGV('beam'), limits: ['no lateral-torsional buckling'] })
+  expect(rows[1]?.url).toBe('http://127.0.0.1:8051/')
+  expect(rows[2]?.url).toBe(null)
+  expect(rows[3]?.acceptArgv).toBe(null)
+  expect(toolsFrom('nonsense')).toEqual([])
+  expect(toolBadge({ state: 'modified', running: false }).color).toBe('error')
+  expect(toolBadge({ state: 'tested', running: false }).text).toMatch(/awaiting your acceptance/)
+
+  // Claude's own shell calls that would accept a tool, in every spelling, are refused
+  for (const command of [
+    'erla tools accept beam --sha abc123',
+    'erla.exe tools accept beam --sha abc123',
+    `& "C:${BS}ERLA${BS}python.exe" -m erla.cli tools accept beam --sha abc`,
+    'cd /tmp && python -m erla.cli tools accept beam --sha abc',
+    'ERLA TOOLS ACCEPT beam',
+  ]) {
+    expect(acceptBlock('Bash', { command })).toMatch(/user's decision/)
+    expect(acceptBlock('PowerShell', { command })).toMatch(/user's decision/)
+    expect(acceptBlock('mcp__Windows-MCP__PowerShell', { command })).toMatch(/user's decision/)
+  }
+  // what stays allowed: listing, testing, other programs, other tools
+  expect(acceptBlock('Bash', { command: 'erla tools list' })).toBe(null)
+  expect(acceptBlock('Bash', { command: 'erla tools test beam' })).toBe(null)
+  expect(acceptBlock('Bash', { command: 'git commit -m "tools accept docs"' })).toBe(null)
+  expect(acceptBlock('Read', { command: 'erla tools accept beam' })).toBe(null)
+})
+
+test('a shell call from Claude that would accept a tool never reaches the shell', async ($, on) => {
+  const rec = fake(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const res = await $.tool.call({ tool: 'Bash', command: 'erla tools accept beam --sha abc123' } as never)
+  expect(JSON.stringify(res)).toMatch(/user's decision/)
+  expect(rec.reached).not.toContain('Bash')
+  await $.tool.call({ tool: 'Bash', command: 'erla tools list' } as never)
+  expect(rec.reached).toContain('Bash')
+})
+
+for (const state of ['core', 'stub', 'disconnected'] as const) {
+  test(`no Engineer Tools card and no engtools call when the server cannot offer them (${state})`, async ($, on) => {
+    const rec = fake(on)
+    if (state === 'stub') rec.stub = 'Installing ERLA 0.6.0: this takes a few minutes.'
+    rec.down = state === 'disconnected'
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'erla', args: '' } as never)
+    const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+    await rec.clock.settle()
+    if (state === 'disconnected') await rec.clock.advance(30000)
+    expect(await ui.find({ type: 'Text', text: /^Engineer Tools/ })).toBeUndefined()
+    expect(rec.mcp.some(c => c.startsWith('engtools'))).toBe(false)
+    await ui.unmount()
+  })
+}
+
+test('Engineer Tools: Open starts an accepted tool; draft and changed tools cannot be opened', async ($, on) => {
+  const rec = fake(on)
+  rec.tools = { tools: [tool('beam', 'accepted'), tool('lug', 'draft'), tool('weld', 'modified')] }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Engineer Tools \(3\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /changed since accepted/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'tool-open-lug' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'tool-open-weld' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'tool-accept-beam' })).toBeUndefined()   // already accepted
+
+  await ui.press({ key: 'tool-open-beam' })
+  await rec.clock.settle()
+  expect(rec.mcp).toContain('engtools_start {"tool_id":"beam"}')
+  expect(await ui.find({ type: 'Text', text: /started: open http:\/\/127\.0\.0\.1:8050\// })).toBeDefined()
+  expect(rec.runs).toEqual([])                                   // starting never runs a local command
+  await ui.unmount()
+})
+
+test('Engineer Tools: Accept needs a second press, then runs the CLI the server named (ET3)', async ($, on) => {
+  const rec = fake(on)
+  rec.tools = { tools: [tool('beam', 'tested')] }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'tool-open-beam' })).toBeUndefined()   // not accepted yet
+
+  await ui.press({ key: 'tool-accept-beam' })
+  await rec.clock.settle()
+  expect(rec.runs).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /Press Accept again to confirm/ })).toBeDefined()
+
+  await rec.clock.advance(FLASH_MS)
+  expect(await ui.find({ type: 'Button', key: 'tool-accept-beam', text: /^Confirm accept$/ })).toBeDefined()
+  await ui.press({ key: 'tool-accept-beam' })
+  await rec.clock.settle()
+  expect(rec.runs).toEqual([ACCEPT_ARGV('beam')])
+  expect(await ui.find({ type: 'Text', text: /accepted: press Open/ })).toBeDefined()
+  expect(rec.mcp.some(c => c.startsWith('engtools_accept'))).toBe(false)
+  await ui.unmount()
+})
+
+test('Engineer Tools: a refused accept and a surface without commands are both said, never silent (L10)', async ($, on) => {
+  const rec = fake(on)
+  rec.tools = { tools: [tool('beam', 'tested')] }
+  rec.runOut = { exitCode: 1, stdout: '{"ok": false, "error": "refused: the tests have not passed on these files"}', stderr: '' }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+  await ui.press({ key: 'tool-accept-beam' })
+  await rec.clock.advance(FLASH_MS)
+  await ui.press({ key: 'tool-accept-beam' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /was not accepted: refused: the tests have not passed/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'tool-accept-beam', text: /Failed/ })).toBeDefined()
+
+  rec.runFails = true
+  await rec.clock.advance(FLASH_MS)
+  await ui.press({ key: 'tool-accept-beam' })
+  await rec.clock.advance(FLASH_MS)
+  await ui.press({ key: 'tool-accept-beam' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /cannot run commands.*erla tools accept beam/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('Engineer Tools: an auto-mode refusal of Open shows on the Button', async ($, on) => {
+  const rec = fake(on)
+  rec.tools = { tools: [tool('beam', 'accepted')] }
+  rec.refuse = 'engtools_start'
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+  await ui.press({ key: 'tool-open-beam' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'tool-open-beam', text: /Failed/ })).toBeDefined()
   await ui.unmount()
 })

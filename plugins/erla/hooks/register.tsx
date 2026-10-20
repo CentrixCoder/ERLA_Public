@@ -1,11 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, UiPressArgument } from 'claude-code'
 
-import type { FileHit, LibraryView, PanelSettings, PanelView, Progress, Source } from '../types'
+import type { EngTool, FileHit, LibraryView, PanelSettings, PanelView, Progress, Source } from '../types'
 import { explain, MISSING_TOOL, RELOAD_HINT, setupError, setupFrom, splitPaths } from './library'
 import type { AddResult, RemoveResult, SiteInfo, StatusResult } from './library'
 import {
-  artifactsFrom, askPrompt, buttonLook, CARD_COLOR, CHART_HITS, DASHBOARD_CHOICES, dashboardLink, DEFAULT_SETTINGS, evalFrom, FLASH_MS, onlyDashboard, filesFrom, isReranker, openPrompt, parseStats,
+  acceptBlock, toolBadge, toolsFrom, artifactsFrom, askPrompt, buttonLook, CARD_COLOR, CHART_HITS, DASHBOARD_CHOICES, dashboardLink, DEFAULT_SETTINGS, evalFrom, FLASH_MS, onlyDashboard, filesFrom, isReranker, openPrompt, parseStats,
   preferencesSection, pressedVariant, qualityLine, checkPolicyLines, readSettings, referencesMarkdown, RERANKER_OPTIONS, rerankerArgs, resultText, scopeBlock, searchFrom, sourceFromShow, tierColor,
 } from './panel'
 
@@ -267,7 +267,7 @@ export const register: Register = on => {
   // - documents opened with library_show join the panel's session sources, with the pages cited
   on('tool.call', async ($, e, next) => {
     const s = await read($, settings)
-    const blocked = scopeBlock(e.tool, s.scope)
+    const blocked = scopeBlock(e.tool, s.scope) ?? acceptBlock(e.tool, e)
     if (blocked) return { deny: blocked }
     let input = e
     if (SEARCH_TOOL.test(e.tool)) {
@@ -440,7 +440,8 @@ async function refresh($: EngineInterface): Promise<void> {
   try {
     const info = await call<SiteInfo>($, 'site_info')
     const probe = info.library_probe
-    await setPanel($, { configUnits: info.unit_system ?? null, checkPolicy: info.check_policy ?? null, version: info.erla_version ?? null, setup: null })
+    await setPanel($, { configUnits: info.unit_system ?? null, checkPolicy: info.check_policy ?? null, version: info.erla_version ?? null, setup: null,
+      engineerTools: info.engineer_tools === true })
     await set($, {
       roots: info.library_roots ?? [],
       filesOnDisk: probe?.files_on_disk ?? null,
@@ -565,6 +566,9 @@ const PANEL_EMPTY: PanelView = {
   query: '',
   files: null,
   dashboardChoices: null,
+  engineerTools: false,
+  tools: null,
+  confirmAccept: null,
   busy: null,
   message: null,
   pressed: null,
@@ -583,6 +587,7 @@ async function refreshStatus($: EngineInterface): Promise<void> {
   } catch (err) {
     await say($, explain('library_stats', err), true)
   }
+  if ((await read($, panel))?.engineerTools) await refreshTools($)
 }
 
 // one action at a time, as in the library dialog; resolves to the work's outcome word, if it gives one
@@ -812,6 +817,99 @@ function exportReferences($: EngineInterface): Promise<string | void> {
   })
 }
 
+// ------------------------------------------------------------------ Engineer Tools (ADR-0003)
+// Programs ERLA built for the user, kept in the site's tools/ store. Open starts the accepted version on
+// 127.0.0.1 through engtools_start (the server refuses a version the user has not accepted, or changed
+// files); Accept runs `erla tools accept` on this computer after a confirming second press, since no MCP
+// tool may accept (ET3).
+
+async function refreshTools($: EngineInterface): Promise<void> {
+  try {
+    await setPanel($, { tools: toolsFrom(await call<unknown>($, 'engtools_list')) })
+  } catch (err) {
+    await say($, explain('engtools_list', err), true)
+  }
+}
+
+type ToolResult = { ok?: boolean; error?: string; url?: string | null; already_running?: boolean; stopped?: boolean;
+  test?: { ok?: boolean; exit?: number | null; seconds?: number; output?: string[] }; output?: string[] }
+
+const lastLines = (lines: string[] | undefined, n = 3) => (lines ?? []).filter(l => l.trim()).slice(-n).join(' | ')
+
+function toolAction($: EngineInterface, t: EngTool, action: 'start' | 'stop' | 'test'): Promise<string | void> {
+  const busy = { start: `Starting ${t.name}…`, stop: `Stopping ${t.name}…`, test: `Running ${t.name}'s tests…` }[action]
+  return panelAct($, busy, async () => {
+    let res: ToolResult
+    const args = { tool_id: t.id }
+    try {
+      // literal names: /erla:setup's permission rules must name every tool the panel calls (test_packaging)
+      res = action === 'start' ? await call<ToolResult>($, 'engtools_start', args)
+        : action === 'stop' ? await call<ToolResult>($, 'engtools_stop', args)
+          : await call<ToolResult>($, 'engtools_test', args)
+    } catch (err) {
+      await say($, explain(`engtools_${action}`, err), true)
+      return
+    }
+    await refreshTools($)
+    if (res.ok === false) {
+      await say($, `${t.name}: ${res.error ?? `${action} failed`}${res.test?.output || res.output ? ` — ${lastLines(res.test?.output ?? res.output)}` : ''}`, true)
+      return
+    }
+    if (action === 'start') {
+      await say($, `${t.name} ${res.already_running ? 'is already running' : 'started'}: open ${res.url ?? 'its link'} (on this computer only).`)
+      return res.already_running ? 'Running' : 'Started'
+    }
+    if (action === 'stop') {
+      await say($, res.stopped ? `${t.name} stopped.` : `${t.name} was not running.`)
+      return res.stopped ? 'Stopped' : 'Not running'
+    }
+    const passed = res.test?.ok === true
+    await say($, passed
+      ? `${t.name}: tests passed in ${res.test?.seconds ?? '?'} s. Review its scope and limits, then press Accept to allow it to start.`
+      : `${t.name}: tests failed (exit ${res.test?.exit ?? '?'}) — ${lastLines(res.test?.output)}`, !passed)
+    return passed ? 'Passed' : 'Failed'
+  })
+}
+
+async function acceptTool($: EngineInterface, t: EngTool): Promise<string | void> {
+  const v = (await read($, panel)) ?? PANEL_EMPTY
+  if (v.confirmAccept !== t.id) {
+    await setPanel($, { confirmAccept: t.id })
+    await say($, `Accept ${t.name} ${t.version}? Its tests passed on these exact files. Accepting lets it start from this panel ` +
+      'or when you ask ERLA; it is decision support, not a certified program. Press Accept again to confirm.')
+    return 'Press again'
+  }
+  await setPanel($, { confirmAccept: null })
+  if (!t.acceptArgv) {
+    await say($, 'This ERLA server did not say how to accept the tool; run `erla tools accept` in a terminal.', true)
+    return
+  }
+  return panelAct($, `Accepting ${t.name}…`, async () => {
+    let out: { exitCode: number | null; stdout: string; stderr: string }
+    try {
+      out = await $.process.run(t.acceptArgv ?? [], { timeoutMs: 120_000 })
+    } catch (err) {
+      // no local commands on this surface: say so and give the command (L10: never a silent fallback)
+      await say($, `This surface cannot run commands, so the panel cannot accept the tool here (${err instanceof Error ? err.message : String(err)}). ` +
+        `In a terminal on this computer run: erla tools accept ${t.id} --sha <hash from erla tools list>`, true)
+      return
+    }
+    let res: ToolResult = {}
+    try {
+      res = JSON.parse(out.stdout) as ToolResult
+    } catch {
+      res = { ok: false, error: (out.stderr || out.stdout).trim().split('\n').slice(-2).join(' ') || `exit code ${out.exitCode}` }
+    }
+    await refreshTools($)
+    if (out.exitCode !== 0 || res.ok === false) {
+      await say($, `${t.name} was not accepted: ${res.error ?? `exit code ${out.exitCode}`}`, true)
+      return
+    }
+    await say($, `${t.name} ${t.version} accepted: press Open to start it.`)
+    return 'Accepted'
+  })
+}
+
 function registerPanel(on: Parameters<Register>[0]): void {
   on('command.run', { command: 'erla' }, async $ => {
     await setPanel($, { busy: 'Reading ERLA status…', message: null, pluginVersion: await readPluginVersion($) })
@@ -965,6 +1063,52 @@ function registerPanel(on: Parameters<Register>[0]): void {
                 await changeSettings($, { dashboardShown: false })
                 await say($, 'KPI dashboard card hidden: Settings → Show the KPI dashboard card brings it back.')
               }, { waits: false }), { waits: false })}
+            </Box>,
+          )
+          : null}
+
+        {v.engineerTools
+          ? card('tools', `Engineer Tools${v.tools ? ` (${v.tools.length})` : ''}`, ACCENT.tools,
+            !v.tools
+              ? <Text key="tools-none" color="subtle">Reading your tools…</Text>
+              : v.tools.length === 0
+                ? <Text key="tools-none" color="subtle">No tools yet. Ask ERLA to build a program for an analysis; once it is registered (erla tools add {'<folder>'}) it is listed here.</Text>
+                : null,
+            ...(v.tools ?? []).map(t => {
+              const badge = toolBadge(t)
+              return (
+                <Box key={`tool-${t.id}`} flexDirection="column" marginTop={1}>
+                  <Box gap={1} flexWrap="wrap">
+                    <Text bold>{t.name}</Text>
+                    {t.version ? <Text color="subtle">{`v${t.version}`}</Text> : null}
+                    <Text color={badge.color}>{`● ${badge.text}`}</Text>
+                  </Box>
+                  {t.summary ? <Text color="subtle">{t.summary}</Text> : null}
+                  {t.limits.length ? <Text color="subtle" wrap="truncate-end">{`Limits: ${t.limits.join('; ')}`}</Text> : null}
+                  {t.running && t.url ? <Text bold><Link href={t.url}>{`Open ${t.name} ↗`}</Link></Text> : null}
+                  <Box gap={1}>
+                    {t.state === 'accepted' && !t.running
+                      ? button(`tool-open-${t.id}`, 'Open', 'primary', () => void press($, `tool-open-${t.id}`, 'Starting…', () => toolAction($, t, 'start')), { scope: 'tool-open' })
+                      : null}
+                    {t.running
+                      ? button(`tool-stop-${t.id}`, 'Stop', 'secondary', () => void press($, `tool-stop-${t.id}`, 'Stopping…', () => toolAction($, t, 'stop')), { scope: 'tool-stop' })
+                      : null}
+                    {t.canAccept
+                      ? button(`tool-accept-${t.id}`, v.confirmAccept === t.id ? 'Confirm accept' : 'Accept', 'primary',
+                        () => void press($, `tool-accept-${t.id}`, 'Accepting…', () => acceptTool($, t)), { scope: 'tool-accept' })
+                      : null}
+                    {t.running
+                      ? null
+                      : button(`tool-test-${t.id}`, 'Run tests', 'secondary', () => void press($, `tool-test-${t.id}`, 'Testing…', () => toolAction($, t, 'test')), { scope: 'tool-test' })}
+                  </Box>
+                </Box>
+              )
+            }),
+            <Box key="tools-actions" gap={1} marginTop={1}>
+              {button('tools-refresh', 'Refresh list', 'secondary', () => void press($, 'tools-refresh', 'Reading…', async () => {
+                await panelAct($, 'Reading your tools…', () => refreshTools($))
+                return (await read($, panel))?.message?.isError ? undefined : 'Updated'
+              }))}
             </Box>,
           )
           : null}

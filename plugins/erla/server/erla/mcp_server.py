@@ -43,6 +43,7 @@ from typing import Any
 from . import __version__, safeio
 from .config import AGENT_ROOT, ConfigError, check_policy, load_config, protocol_dir, validate_config
 from .edition import render
+from .safeio import TOOLS_SHIPPED
 from .disciplines import info as disciplines_info
 from .specialists import SPECIALISTS, installed
 
@@ -222,6 +223,8 @@ def t_site_info() -> dict:
                             "disciplines": disciplines_info(),       # discipline skills (ADR-0002)
                             "check_policy": _check_policy(),         # when erla:professor vets a packet (user's)
                             "professor_calibrated_models": _calibrated()}
+    if TOOLS_SHIPPED:                                    # the panel shows the Engineer Tools card
+        info["engineer_tools"] = True
     if not info["specialists"]:
         info["edition"] = ("core: no specialist agents installed; do discipline work as the lead agent and say "
                            "no specialist reviewed it")
@@ -417,6 +420,33 @@ def t_remove_library_folder(path: str) -> dict:
     return {"removed": True, "summary": _summary(res), **res,
             "next_step": "run index_start to drop the removed folder's entries from the index "
                          "(its files are not touched)"}
+
+
+def _engtools(action: str, tool_id: str = "") -> dict:
+    from . import engtools
+    cfg = _cfg()
+    try:
+        if action == "list":
+            return engtools.list_tools(cfg)
+        return {"test": engtools.test, "start": engtools.start, "stop": engtools.stop}[action](cfg, tool_id)
+    except engtools.ToolError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def t_engtools_list() -> dict:
+    return _engtools("list")
+
+
+def t_engtools_test(tool_id: str) -> dict:
+    return _engtools("test", tool_id)
+
+
+def t_engtools_start(tool_id: str) -> dict:
+    return _engtools("start", tool_id)
+
+
+def t_engtools_stop(tool_id: str) -> dict:
+    return _engtools("stop", tool_id)
 
 
 def t_site_resurvey() -> dict:
@@ -980,6 +1010,18 @@ def build_server():
         "the picker; this call then waits for and returns that choice instead of opening a second one.")
     reg(t_remove_library_folder, "remove_library_folder", "Stop using one library folder (the folder and "
         "its files are never touched). Call only when the user asks to remove that folder.", wr)
+
+    if TOOLS_SHIPPED:                                # Engineer Tools: full edition only (ADR-0003)
+        reg(t_engtools_list, "engtools_list", "Engineer Tools: the programs ERLA built for the user and keeps in "
+            "the site's tools/ store - name, version, state (draft, tested, accepted, modified), last test, whether "
+            "it runs and its local URL. Read only. Acceptance is the user's (control panel or CLI); there is no "
+            "tool to accept.", ro)
+        reg(t_engtools_test, "engtools_test", "Run an Engineer Tool's own tests in its environment and record "
+            "the result for its current files. Call when the user asks to test the tool.", wr)
+        reg(t_engtools_start, "engtools_start", "Start an accepted Engineer Tool on this computer (127.0.0.1) and "
+            "return its URL. Refused when it is not accepted or its files changed since acceptance. Call only when "
+            "the user starts it or asks you to (guardrail G1.3).", wr)
+        reg(t_engtools_stop, "engtools_stop", "Stop a running Engineer Tool.", wr)
 
     pdir = protocol_dir()
     for name in PROTOCOL_FILES:

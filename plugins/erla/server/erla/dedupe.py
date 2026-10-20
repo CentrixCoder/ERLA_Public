@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
 
@@ -25,27 +23,23 @@ def sha256_file(path: Path, bufsize: int = 4 * 1024 * 1024) -> str:
 
 
 def _load_native() -> Callable[[str, int], str | None] | None:
-    """Rust core (rust/erla_core, Step 3) when installed and not disabled by ERLA_PURE_PYTHON=1."""
-    if os.environ.get("ERLA_PURE_PYTHON") == "1":
-        return None
-    import importlib
+    """A compiled simhash when this build ships one (erla/native.py); None runs pure Python."""
     try:
-        mod: Any = importlib.import_module("erla_core")
-    except ImportError:
+        from erla.native import load_simhash
+    except ImportError:                   # the free core edition is Python only
         return None
-    fn: Callable[[str, int], str | None] = mod.simhash
-    return fn
+    return load_simhash()
 
 
 _NATIVE = _load_native()
-BACKEND = "rust" if _NATIVE else "python"
+BACKEND = "native" if _NATIVE else "python"
 
 
 def simhash(text: str, max_chars: int = 300_000) -> str | None:
     """64-bit simhash over word 3-shingles of normalised text (hex string).
 
-    Uses the Rust core when available; it is bit-identical to :func:`_simhash_py`
-    (tests/test_rust_parity.py). Text Rust cannot accept (lone surrogates) uses Python."""
+    Uses a compiled core when the build has one; it is bit-identical to :func:`_simhash_py`.
+    Text the compiled core cannot accept (lone surrogates) uses Python."""
     if _NATIVE is not None:
         try:
             return _NATIVE(text, max_chars)

@@ -723,6 +723,31 @@ def cmd_feedback(a) -> int:
     return 0
 
 
+def cmd_tools(a) -> int:
+    """Engineer Tools (ADR-0003). ``accept`` exists only here: no MCP tool can accept a tool (ET3)."""
+    import json
+
+    from . import engtools
+    cfg = _cfg()
+    try:
+        if a.action == "list":
+            res = engtools.list_tools(cfg)
+        elif not a.target:
+            raise engtools.ToolError(f"erla tools {a.action} needs a tool id" + (" or folder" if a.action == "add" else ""))
+        elif a.action == "add":
+            res = engtools.add(cfg, a.target, env=not a.no_env)
+        elif a.action == "accept":
+            if not a.sha:
+                raise engtools.ToolError("accept needs --sha: the hash of the files you checked (erla tools list)")
+            res = engtools.accept(cfg, a.target, a.sha, a.by)
+        else:
+            res = {"test": engtools.test, "start": engtools.start, "stop": engtools.stop}[a.action](cfg, a.target)
+    except engtools.ToolError as exc:
+        res = {"ok": False, "error": str(exc)}
+    print(json.dumps(res, indent=2))
+    return 0 if res.get("ok", True) else 1
+
+
 # ------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="erla", description="ERLA - Engineering Research Library Agent toolkit")
@@ -891,6 +916,17 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--evidence", default="")
         s.add_argument("--rule", default="")
         s.set_defaults(fn=cmd_lesson)
+
+    from .safeio import TOOLS_SHIPPED
+    if TOOLS_SHIPPED:                               # Engineer Tools: full edition only (ADR-0003)
+        s = sub.add_parser("tools", help="Engineer Tools: programs ERLA built for you (list, add, test, accept, "
+                                         "start, stop); output is JSON")
+        s.add_argument("action", choices=["list", "add", "test", "accept", "start", "stop"])
+        s.add_argument("target", nargs="?", help="tool id, or for add the folder holding erla-tool.toml")
+        s.add_argument("--sha", help="accept: the hash of the files you checked (from list)")
+        s.add_argument("--by", default="", help="accept: who accepts (default: your user name)")
+        s.add_argument("--no-env", action="store_true", help="add: do not build the tool's environment")
+        s.set_defaults(fn=cmd_tools)
 
     s = sub.add_parser("feedback", help="record result feedback")
     s.add_argument("doc_id", type=int)

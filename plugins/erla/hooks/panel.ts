@@ -1,7 +1,7 @@
 // Pure helpers for the /erla control panel in register.tsx (the engine follows $ only within
 // one file, so the panel's hooks live there).
 
-import type { DashboardChoice, EvalSummary, FileHit, LastSearch, PanelSettings, PanelView, Pressed, RankedHit, Source } from '../types'
+import type { DashboardChoice, EngTool, EvalSummary, FileHit, LastSearch, PanelSettings, PanelView, Pressed, RankedHit, Source } from '../types'
 
 export const DEFAULT_SETTINGS: PanelSettings = {
   units: 'config', semantic: true, excludeRestricted: false, scope: 'both', reranker: 'default', dashboardUrl: null, dashboardShown: false,
@@ -109,6 +109,55 @@ export function scopeBlock(tool: string, scope: PanelSettings['scope']): string 
       'searched. Use the web under ERLA\'s web rules; the user can change this in /erla → Settings.'
   }
   return null
+}
+
+// Engineer Tools (ADR-0003, ET3): only the user accepts a tool. There is no MCP tool for it; the panel's
+// Accept button runs `erla tools accept` itself. A shell call from Claude that would run it is denied here,
+// whatever the spelling (erla, erla.exe, python -m erla.cli, a path in quotes).
+const ACCEPT_CMD = /\berla(?:\.exe|\.cli)?["']?\s+(?:[^\n;&|]*\s)?tools\s+accept\b/i
+const SHELL_TOOLS = /^(?:Bash|PowerShell)$|(?:^|__)(?:PowerShell|Shell|run_in_terminal)$/
+
+export function acceptBlock(tool: string, input: unknown): string | null {
+  if (!SHELL_TOOLS.test(tool)) return null
+  const command = input && typeof input === 'object' ? (input as { command?: unknown }).command : null
+  if (typeof command !== 'string' || !ACCEPT_CMD.test(command)) return null
+  return 'Blocked by ERLA: accepting an Engineer Tool is the user\'s decision (guardrail G1.3). Ask the user to ' +
+    'review the tool and press Accept in the /erla control panel, or run `erla tools accept` themselves.'
+}
+
+const TOOL_STATES = ['draft', 'tested', 'accepted', 'modified'] as const
+
+// engtools_list's JSON -> the tools the card lists; rows it cannot read are left out
+export function toolsFrom(raw: unknown): EngTool[] {
+  const list = raw && typeof raw === 'object' ? (raw as { tools?: unknown }).tools : null
+  if (!Array.isArray(list)) return []
+  const str = (x: unknown) => (typeof x === 'string' ? x : '')
+  const out: EngTool[] = []
+  for (const t of list as Record<string, unknown>[]) {
+    const m = (t?.manifest ?? {}) as Record<string, unknown>
+    const state = TOOL_STATES.find(s => s === t?.state)
+    if (!t || typeof t.id !== 'string' || !state) continue
+    const last = t.last_test as { ok?: unknown; at?: unknown } | null | undefined
+    const argv = t.accept_argv
+    out.push({
+      id: t.id, name: str(m.name) || t.id, version: str(m.version), summary: str(m.summary), state,
+      running: t.running === true, url: typeof t.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\//.test(t.url) ? t.url : null,
+      lastTest: last ? { ok: last.ok === true, at: typeof last.at === 'string' ? last.at : null } : null,
+      canAccept: t.can_accept === true,
+      acceptArgv: Array.isArray(argv) && argv.length > 0 && argv.every(a => typeof a === 'string') ? argv as string[] : null,
+      limits: Array.isArray(m.limits) ? (m.limits as unknown[]).filter((x): x is string => typeof x === 'string') : [],
+    })
+  }
+  return out
+}
+
+// the state badge: words a user reads, and the theme colour for it
+export function toolBadge(t: Pick<EngTool, 'state' | 'running'>): { text: string; color: 'success' | 'warning' | 'subtle' | 'error' } {
+  if (t.running) return { text: 'running', color: 'success' }
+  if (t.state === 'accepted') return { text: 'accepted', color: 'success' }
+  if (t.state === 'tested') return { text: 'tested – awaiting your acceptance', color: 'warning' }
+  if (t.state === 'modified') return { text: 'changed since accepted – test and accept again', color: 'error' }
+  return { text: 'draft – run its tests', color: 'subtle' }
 }
 
 // "p.41" / "p 41" / "page 41" -> 41; anything else (a sheet, a section) -> null
@@ -324,6 +373,7 @@ export const CARD_COLOR = {
   library: 'suggestion',
   settings: 'merged',
   sources: 'success',
+  tools: 'promptBorder',
 } as const
 
 // theme keys that are one colour in Claude's built-in themes, each mapped to the name used for it

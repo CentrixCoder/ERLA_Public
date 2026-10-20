@@ -10,6 +10,8 @@ export type SiteInfo = {
   library_roots?: string[]
   error?: string
   library_probe?: { files_on_disk?: number; documents_indexed?: number; new?: number; missing?: number }
+  // the server offers the Engineer Tools tools (engtools_*; the full edition)
+  engineer_tools?: boolean
 }
 export type AddResult = { added?: boolean; picker?: string; summary?: string; message?: string; error?: string; index_job?: unknown }
 export type RemoveResult = { removed?: boolean; summary?: string; error?: string }

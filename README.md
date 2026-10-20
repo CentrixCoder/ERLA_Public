@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.8-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.5.9-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,12 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.5.9
+
+- **Word and PowerPoint files.** When ERLA reads an Office file it now closes only the Word or PowerPoint it
+  started itself. A Word you opened at the same moment is no longer closed, and a busy Office start is retried.
+- The free edition now runs entirely in Python; nothing to install or change.
+
 ### 0.5.8
 
 - **The control panel answers every click.** The button you press changes at once: ⏳ and a short word while the
@@ -38,13 +44,6 @@ Updated automatically at every release; older versions are listed under
 - A locator now opens only what it names: `p.6` never opens `p.60`.
 - After you update, the first refresh re-reads your Word files once. A very large `.doc` that Word cannot open
   waits for one timeout and is then read by the built-in reader.
-
-### 0.5.3
-
-In short: the control panel finds your KPI dashboard for you.
-- **Find my dashboard.** On the KPI dashboard card (turn it on in the panel's Settings), press
-  **Find my dashboard**. ERLA lists your claude.ai artifacts and saves the dashboard's link, or lets you
-  pick it from the list. Pasting the address still works.
 
 <!-- release-notes:end -->
 

@@ -10,11 +10,14 @@ Safety (guardrails G1.3/G1.4):
   never next to the original, G1.1), deleted after reading, and reading that copy with the Word reader (word.py), so tracked changes,
   exponents, Symbol-font characters, equations, numbering and tables survive. The Office-free parser
   (ole_native) is the fallback.
-- Each file has a timeout; on hang the worker and its Office process are killed.
+- Each file has a timeout; on hang the worker and its Office process are killed. "Its" Office process
+  is the one whose window belongs to the instance the worker started (``_own_pid``), never a process
+  that merely appeared meanwhile: the person's own Word, or another program's, is never killed.
 """
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import subprocess
 import time
@@ -26,20 +29,16 @@ FORCE_DISABLE_MACROS = 3
 DUMMY_PASSWORD = "erla-no-password"
 WD_FORMAT_DOCX = 16          # wdFormatDocumentDefault: macro-free .docx
 PARA_WINDOW_CHARS = 6000
+# COM answers while Office is busy starting or another instance is shutting down; worth a retry
+TRANSIENT_HRESULTS = {
+    -2146959355,   # CO_E_SERVER_EXEC_FAILURE 0x80080005 "Server execution failed"
+    -2147418111,   # RPC_E_CALL_REJECTED 0x80010001
+    -2147417846,   # RPC_E_SERVERCALL_RETRYLATER 0x8001010A
+}
+DISPATCH_ATTEMPTS = 4
+DISPATCH_WAIT_S = 3.0
 
-
-def _office_pids(image: str) -> set[int]:
-    try:
-        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=20).stdout
-    except Exception:
-        return set()
-    pids = set()
-    for line in out.splitlines():
-        parts = [p.strip('"') for p in line.split('","')]
-        if len(parts) > 1 and parts[1].isdigit():
-            pids.add(int(parts[1]))
-    return pids
+log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------- child side
@@ -130,19 +129,57 @@ def _ppt_extract(app, path: str) -> dict:
     return {"chunks": chunks, "meta": {"title": title, "slide_count": len(chunks)}}
 
 
-def _worker(kind: str, conn) -> None:
+def dispatch(progid: str, attempts: int = DISPATCH_ATTEMPTS, wait_s: float = DISPATCH_WAIT_S):
+    """A new Office instance (DispatchEx), retried a bounded number of times while COM answers that the
+    server is busy; any other error, or the last attempt's, is raised (L10: never a silent give-up)."""
     import pythoncom
     import win32com.client
+    for attempt in range(1, attempts + 1):
+        try:
+            return win32com.client.DispatchEx(progid)
+        except pythoncom.com_error as exc:
+            if exc.args[0] not in TRANSIENT_HRESULTS or attempt == attempts:
+                raise
+            log.warning("%s did not start (%s), attempt %d of %d", progid, exc.args[1], attempt, attempts)
+            time.sleep(wait_s)
+    raise AssertionError("unreachable")
+
+
+def _own_pid(app, kind: str) -> int | None:
+    """The process of the Office instance ``app`` is connected to, read from its own window. A process
+    list taken before and after the start would also claim any Word or PowerPoint that another program
+    (or the person) started in between, and ComWorker.kill would then force-kill it."""
+    import uuid
+
+    import win32gui
+    import win32process
+    try:
+        if kind == "word":                   # Word has no Application.Hwnd: find its window by a unique caption
+            tag = f"erla-worker-{uuid.uuid4().hex}"
+            app.Caption = tag
+            hwnd = win32gui.FindWindow("OpusApp", tag)
+        else:
+            hwnd = int(app.HWND)
+        pid = win32process.GetWindowThreadProcessId(hwnd)[1] if hwnd else 0
+    except Exception:
+        return None
+    return pid or None
+
+
+def _worker(kind: str, conn) -> None:
+    import pythoncom
 
     pythoncom.CoInitialize()
-    image = "WINWORD.EXE" if kind == "word" else "POWERPNT.EXE"
-    before = _office_pids(image)
+    try:
+        app = dispatch("Word.Application" if kind == "word" else "PowerPoint.Application")
+    except Exception as exc:
+        conn.send(("fail", f"{type(exc).__name__}: {exc}"[:500]))
+        pythoncom.CoUninitialize()
+        return
     if kind == "word":
-        app = win32com.client.DispatchEx("Word.Application")
         app.Visible = False
         app.DisplayAlerts = 0
     else:
-        app = win32com.client.DispatchEx("PowerPoint.Application")
         try:
             app.DisplayAlerts = 1  # ppAlertsNone
         except Exception:
@@ -151,8 +188,8 @@ def _worker(kind: str, conn) -> None:
         app.AutomationSecurity = FORCE_DISABLE_MACROS
     except Exception:
         pass
-    time.sleep(0.5)
-    conn.send(("pids", sorted(_office_pids(image) - before)))
+    pid = _own_pid(app, kind)
+    conn.send(("pids", [pid] if pid else []))
     try:
         while True:
             msg = conn.recv()
@@ -190,10 +227,19 @@ class ComWorker:
         self.proc = ctx.Process(target=_worker, args=(self.kind, child), daemon=True)
         self.proc.start()
         self.conn = parent
-        if not parent.poll(90):
+        if not parent.poll(90 + DISPATCH_ATTEMPTS * DISPATCH_WAIT_S):
             self.kill()
             raise RuntimeError(f"{self.kind} COM worker failed to start")
-        tag, pids = parent.recv()
+        try:
+            tag, pids = parent.recv()
+        except EOFError:
+            tag, pids = "fail", "the worker process exited"
+        if tag != "pids":
+            self.kill()
+            raise RuntimeError(f"{self.kind} COM worker failed to start: {pids}")
+        if not pids:
+            log.warning("%s COM worker: its Office process could not be identified; a hang will stop "
+                        "the worker but leave that Office process running", self.kind)
         self.office_pids = pids
 
     def kill(self) -> None:

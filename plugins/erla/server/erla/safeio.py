@@ -47,6 +47,9 @@ SQLITE_SIDECARS = ("", "-wal", "-shm", "-journal")
 SETUP_DIRS = ("config", "eval")
 SETUP_FILES = ("SITE_NOTES.md", "PROTOCOL_REVIEW.md")
 RUNTIME_DIRS = ("out", "logs", "web_cache", "models")
+TOOLS_DIR = "tools"
+# the Engineer Tools store is a write location only in builds that ship erla/engtools.py (the full edition)
+TOOLS_SHIPPED = (Path(__file__).with_name("engtools.py")).is_file()
 
 
 def _norm(p: Path | str) -> Path:
@@ -77,6 +80,8 @@ class Guard:
         files = {Path(str(idx) + s) for s in SQLITE_SIDECARS}
         files |= {_norm(cfg.agent_root / n) for n in VECTOR_FILES}
         dirs = (cfg.out_dir, cfg.log_dir, cfg.web_cache_dir, cfg.agent_root / "models")
+        if TOOLS_SHIPPED:                     # the Engineer Tools store (G1.2, full edition only)
+            dirs += (cfg.agent_root / TOOLS_DIR,)
         return cls(agent_root=_norm(cfg.agent_root),
                    library_roots=tuple(_norm(r) for r in cfg.library_roots),
                    dirs=tuple(_norm(d) for d in dirs), files=frozenset(files))
@@ -259,3 +264,13 @@ def copyfile(g: Policy, src: Path | str, dst: Path | str, *, setup: bool = False
     d = parent_at(check(g, dst, setup=setup))
     shutil.copyfile(src, d)
     return d
+
+
+def rmtree(g: Policy, path: Path | str) -> None:
+    """Remove a folder and its contents. The folder itself must be a checked location, and no
+    location is removable as a whole (``out/`` or ``tools/`` stay; only folders inside them go)."""
+    p = check(g, path)
+    guard = as_guard(g)
+    if _norm(p) in guard.dirs or _norm(p) == guard.agent_root:
+        raise ReadOnlyViolation(f"Write refused - a whole write location cannot be removed: {path}")
+    shutil.rmtree(p, ignore_errors=False)

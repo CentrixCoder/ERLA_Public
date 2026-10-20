@@ -98,6 +98,24 @@ export type EvalSummary = {
 // one of the person's claude.ai artifacts, offered by the KPI dashboard card's Find my dashboard
 export type DashboardChoice = { title: string; url: string }
 
+// one Engineer Tool from engtools_list (ADR-0003): a program ERLA built for the user, kept in the site's tools/
+export type EngTool = {
+  id: string
+  name: string
+  version: string
+  summary: string
+  // draft (registered) -> tested (tests passed on these files) -> accepted (by the user) -> modified (changed since)
+  state: 'draft' | 'tested' | 'accepted' | 'modified'
+  running: boolean
+  url: string | null
+  lastTest: { ok: boolean; at: string | null } | null
+  // the user may accept these files: tests passed on them and they are not the accepted ones
+  canAccept: boolean
+  // the command the Accept button runs on this computer (never an MCP tool: ET3)
+  acceptArgv: string[] | null
+  limits: string[]
+}
+
 export type PanelView = {
   // library_stats, parsed
   indexState: string | null
@@ -120,6 +138,11 @@ export type PanelView = {
   files: FileHit[] | null
   // Find my dashboard's artifacts to pick from, when it could not pick one by itself
   dashboardChoices: DashboardChoice[] | null
+  // the server offers Engineer Tools (site_info engineer_tools; the full edition) and its list, once read
+  engineerTools: boolean
+  tools: EngTool[] | null
+  // the tool whose Accept was pressed once: a second press accepts it (the user's decision, ET3)
+  confirmAccept: string | null
   busy: string | null
   message: { text: string; isError: boolean } | null
   // the Button press the panel is showing on that Button, null when none
