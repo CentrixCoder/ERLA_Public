@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.7.1-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,16 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.7.1
+
+- **Update before your first refresh under 0.7.0.** The full-text upgrade that 0.7.0's first `erla refresh` runs
+  left searches without keyword matches for the minutes it took, and for good if the refresh was stopped
+  midway. It is now one transaction: searches use the old index until the new one is complete, an interrupted
+  upgrade runs again on the next refresh, and an index already left empty is rebuilt.
+- **`run_eval` works again** from the agent (it failed on every call).
+- **`erla eval` shows how sure a score is:** 95% intervals on every metric, scores per question class, questions
+  the library cannot answer reported apart, and `--save` / `--compare` to compare two runs question by question.
+
 ### 0.7.0
 
 - **Search finds what it used to miss.** A word at the end of a sentence ("was measured.") and the parts of a
@@ -42,10 +52,6 @@ Updated automatically at every release; older versions are listed under
   files without it and meant to try Word again on the next refresh, but kept serving the first reading, so the
   index stayed "out of date". The next refresh now gives those files to Word.
 - The index remembers when each document was first added, even after a full re-index.
-
-### 0.5.10
-
-- Maintenance release: no change to the free edition.
 
 <!-- release-notes:end -->
 

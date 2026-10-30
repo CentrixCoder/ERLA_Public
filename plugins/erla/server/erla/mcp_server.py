@@ -869,7 +869,8 @@ def t_index_status(tail: int = 20) -> dict:
 
 def t_run_eval() -> dict:
     from . import cli
-    ns = argparse.Namespace(golden=None, no_vector=False, no_rerank=False)
+    ns = argparse.Namespace(golden=None, no_vector=False, no_rerank=False, reranker=None, memory=False,
+                            intent=None, save=None, compare=None)
     return {"text": _capture(cli.cmd_eval, ns)}
 
 

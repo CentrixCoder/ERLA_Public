@@ -10,12 +10,26 @@ Each group earns its gain once, at the first hit that matches it, so duplicate c
 document cannot inflate the score; the ideal ranking puts the groups in grade order. nDCG@10 uses
 gain 2^grade - 1 and log2(rank + 1) discount. `primary@1` is the share of queries whose top hit is
 the primary source (the expected documents when no primary is given).
+
+Optional per item:
+
+    class: value | conceptual | paraphrase | standard | ocr | negative   (any label; metrics per class)
+    negative: true      the library holds no answer (also implied by class `negative`). Negatives are
+                        left out of the ranking metrics and reported apart: the top hit's re-ranker
+                        relevance next to that of the answerable questions. No pass/fail threshold
+                        until one is calibrated on this report.
+
+Every ranking metric carries a 95% bootstrap interval over the questions (`ci95`), and
+`compare_runs` gives the paired difference of two runs on the same questions, so a change can be
+told apart from the noise of a small golden set (L2).
 """
 
 from __future__ import annotations
 
 import json
 import math
+import random
+import statistics
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +48,16 @@ def _match(hit, expects: list[str]) -> bool:
     # Golden files name documents by library-relative path with '/'; hit paths on Windows carry '\'
     hay = f"{hit.title} {hit.path} {hit.standard_id or ''}".lower().replace("\\", "/")
     return any(e.lower().replace("\\", "/") in hay for e in expects)
+
+
+def _check_names(it: dict[str, Any]) -> None:
+    """Document names must load as text: YAML reads an unquoted `07031_034` as the octal number 1847836 and
+    `30378_05` as 3037805, which then matches nothing and scores a silent miss. Refuse instead."""
+    for key in ("primary", "expect_docs", "related"):
+        for x in it.get(key) or []:
+            if not isinstance(x, str):
+                raise ValueError(f"golden item {it.get('id') or it.get('query')!r}: {key} entry {x!r} is not text; "
+                                 f"quote it in the YAML file (YAML turned the name into a number)")
 
 
 def _groups(it: dict[str, Any]) -> list[tuple[int, list[str]]]:
@@ -89,7 +113,8 @@ MIN_GOLDEN = 30   # S14: fewer golden questions than this cannot tell re-rankers
 
 def last_run(cfg: Config) -> dict | None:
     """The latest recorded eval run, for the control panel's search-quality tile; None when there is none.
-    Runs recorded before nDCG@10 existed give ndcg@10 None, not 0 (no score is not a zero score)."""
+    Runs recorded before nDCG@10 existed give ndcg@10 None, not 0 (no score is not a zero score).
+    `n` counts the scored questions: negatives add no ranking evidence toward MIN_GOLDEN."""
     hist = Path(cfg.log_dir) / "eval_history.jsonl"
     try:
         lines = hist.read_text(encoding="utf-8").strip().splitlines() if hist.is_file() else []
@@ -99,7 +124,7 @@ def last_run(cfg: Config) -> dict | None:
     if not isinstance(rec, dict):
         return None
     nd = rec.get("ndcg@10")
-    return {"ts": rec.get("ts"), "n": int(rec.get("n") or 0),
+    return {"ts": rec.get("ts"), "n": int(rec.get("n_scored", rec.get("n")) or 0),
             "ndcg@10": float(nd) if isinstance(nd, (int, float)) else None,
             "recall@10": rec.get("recall@10"), "mrr": rec.get("mrr"), "reranker": rec.get("reranker"),
             "min_questions": MIN_GOLDEN}
@@ -132,6 +157,47 @@ def _value_at(con, hit, locators: list[str], value: str) -> bool:
     return False
 
 
+METRICS = ("recall@5", "recall@10", "mrr", "ndcg@10", "primary@1")
+BOOT_SAMPLES = 2000
+BOOT_SEED = 20261027      # fixed: the same run gives the same interval
+
+
+def is_negative(it: dict[str, Any]) -> bool:
+    return bool(it.get("negative")) or str(it.get("class") or "").lower() == "negative"
+
+
+def bootstrap_ci(values: list[float], samples: int = BOOT_SAMPLES, seed: int = BOOT_SEED) -> list[float] | None:
+    """95% percentile interval of the mean, resampling the questions with replacement; None below 2 values."""
+    n = len(values)
+    if n < 2:
+        return None
+    rng = random.Random(seed)
+    means = sorted(sum(values[rng.randrange(n)] for _ in range(n)) / n for _ in range(samples))
+    return [round(means[int(0.025 * samples)], 3), round(means[min(samples - 1, int(0.975 * samples))], 3)]
+
+
+def _summary(rows: list[dict]) -> dict:
+    """Mean of each ranking metric over the rows, with its 95% bootstrap interval."""
+    n = max(len(rows), 1)
+    out: dict[str, Any] = {m: round(sum(r[m] for r in rows) / n, 3) for m in METRICS}
+    out["ci95"] = {m: bootstrap_ci([float(r[m]) for r in rows]) for m in METRICS}
+    return out
+
+
+def compare_runs(base: dict, new: dict, samples: int = BOOT_SAMPLES, seed: int = BOOT_SEED) -> dict:
+    """Paired difference new - base per metric over the answerable questions both runs share (by id,
+    else by query text), with a 95% bootstrap interval. An interval that spans 0 is not a change."""
+    def key(r: dict) -> str:
+        return str(r.get("id") or r["query"])
+    b = {key(r): r for r in base.get("rows") or [] if not r.get("negative")}
+    pairs = [(b[key(r)], r) for r in new.get("rows") or [] if not r.get("negative") and key(r) in b]
+    out: dict[str, Any] = {"n_paired": len(pairs)}
+    for m in METRICS:
+        d = [float(nr[m]) - float(br[m]) for br, nr in pairs]
+        out[m] = {"delta": round(sum(d) / len(d), 3) if d else None, "ci95": bootstrap_ci(d, samples, seed)}
+    return out
+
+
 def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool | None = None,
              reranker: str | None = None, record: bool = True, memory: bool = False,
              intent: str | None = None) -> dict:
@@ -139,12 +205,14 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
     locate). Items with `status: unreviewed` (candidates from `erla memory golden`) are skipped."""
     raw = yaml.safe_load(golden.read_text(encoding="utf-8")) or []
     items = [it for it in raw if str(it.get("status") or "") != "unreviewed"]
-    rows, r5, r10, mrr, nd, p1, vals, vtot = [], 0, 0, 0.0, 0.0, 0, 0, 0
-    lhit, ltot, cval, ctot = 0, 0, 0, 0
+    for it in items:                      # before any search: a bad file fails at once, not after minutes
+        _check_names(it)
+    rows: list[dict] = []
+    vals, vtot, lhit, ltot, cval, ctot = 0, 0, 0, 0, 0, 0
     secs = 0.0
     mode = ""
-    by_class: dict[str, list[float]] = {}
     calib: dict[str, dict[str, int]] = {}
+    neg_verdicts: dict[str, int] = {}
     for it in items:
         it_intent = it.get("intent") if intent == "item" else intent
         t0 = time.perf_counter()
@@ -155,18 +223,27 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
         secs += time.perf_counter() - t0
         all_hits = hits
         hits = hits[:10]                  # scored @10; searched as ERLA searches (k changes the AND/OR candidate pool)
+        verdict = None
+        if con is not None and hasattr(con, "execute"):
+            try:
+                from .search import evidence
+                verdict = evidence(con, it["query"], all_hits, mode, cfg)["verdict"]
+            except Exception:
+                verdict = None
+        row: dict[str, Any] = {"id": it.get("id"), "query": it["query"],
+                               "class": str(it.get("class") or it.get("intent") or "unclassified"),
+                               "evidence": verdict, "top": [h.title[:60] for h in hits[:3]],
+                               "top_rerank": getattr(hits[0], "rerank", None) if hits else None}
+        if is_negative(it):               # no expected document: reported apart, with the verdict it drew
+            row["negative"] = True
+            if verdict:
+                neg_verdicts[verdict] = neg_verdicts.get(verdict, 0) + 1
+            rows.append(row)
+            continue
         groups = _groups(it)
         relevant = [s for _, subs in groups for s in subs]
         rank = next((i for i, h in enumerate(hits, 1) if _match(h, relevant)), None)
-        r5 += int(rank is not None and rank <= 5)
-        r10 += int(rank is not None)
-        mrr += (1 / rank) if rank else 0
         q_ndcg = ndcg(hits, groups)
-        nd += q_ndcg
-        cls = str(it.get("class") or it.get("intent") or "unclassified")
-        by_class.setdefault(cls, []).append(q_ndcg)
-        top_is_primary = bool(hits) and bool(groups) and _match(hits[0], groups[0][1])
-        p1 += int(top_is_primary)
         vhit = None
         if it.get("expect_value") not in (None, ""):
             vtot += 1
@@ -187,41 +264,49 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
                 ctot += 1
                 cite_ok = _value_at(con, first, first.locators, str(it["expect_value"]))
                 cval += int(cite_ok)
-        verdict = None
-        if con is not None and hasattr(con, "execute"):
-            try:
-                from .search import evidence
-                verdict = evidence(con, it["query"], all_hits, mode, cfg)["verdict"]
-            except Exception:
-                verdict = None
-            if verdict:
-                c = calib.setdefault(verdict, {"n": 0, "right_in_top5": 0})
-                c["n"] += 1
-                c["right_in_top5"] += int(rank is not None and rank <= 5)
-        rows.append({"id": it.get("id"), "query": it["query"], "rank": rank, "ndcg@10": round(q_ndcg, 3),
-                     "primary@1": top_is_primary, "value_found": vhit, "locator_hit@5": loc_ok,
-                     "citation_valid": cite_ok, "evidence": verdict, "class": cls,
-                     "top": [h.title[:60] for h in hits[:3]]})
+        if verdict:
+            c = calib.setdefault(verdict, {"n": 0, "right_in_top5": 0})
+            c["n"] += 1
+            c["right_in_top5"] += int(rank is not None and rank <= 5)
+        row.update({"rank": rank, "recall@5": int(rank is not None and rank <= 5), "recall@10": int(rank is not None),
+                    "mrr": round(1 / rank, 4) if rank else 0.0, "ndcg@10": round(q_ndcg, 3),
+                    "primary@1": int(bool(hits) and bool(groups) and _match(hits[0], groups[0][1])),
+                    "value_found": vhit, "locator_hit@5": loc_ok, "citation_valid": cite_ok})
+        rows.append(row)
+    pos = [r for r in rows if not r.get("negative")]
+    neg = [r for r in rows if r.get("negative")]
     n = max(len(items), 1)
-    result = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "n": len(items),
-              "recall@5": round(r5 / n, 3), "recall@10": round(r10 / n, 3), "mrr": round(mrr / n, 3),
-              "ndcg@10": round(nd / n, 3), "primary@1": round(p1 / n, 3),
-              "value_match": f"{vals}/{vtot}",
-              "locator_hit@5": round(lhit / ltot, 3) if ltot else None, "locator_items": ltot,
-              "citation_valid": f"{cval}/{ctot}",
-              "ndcg@10_by_class": {k: round(sum(v) / len(v), 3) for k, v in sorted(by_class.items())},
-              "evidence_calibration": calib, "skipped_unreviewed": len(raw) - len(items),
-              "intent": intent, "sec_per_query": round(secs / n, 2), "hybrid": hybrid,
-              "mode": mode, "reranker": reranker or (cfg.rerank or {}).get("model"), "golden": str(golden),
-              "rows": rows}
+    classes = sorted({r["class"] for r in pos})
+    by_class = {c: {"n": len(cr), **_summary(cr)} for c in classes for cr in [[r for r in pos if r["class"] == c]]}
+    result: dict[str, Any] = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "n": len(items),
+                              "n_scored": len(pos), **_summary(pos),
+                              "value_match": f"{vals}/{vtot}",
+                              "locator_hit@5": round(lhit / ltot, 3) if ltot else None, "locator_items": ltot,
+                              "citation_valid": f"{cval}/{ctot}",
+                              "ndcg@10_by_class": {c: v["ndcg@10"] for c, v in by_class.items()},
+                              "evidence_calibration": calib, "skipped_unreviewed": len(raw) - len(items),
+                              "intent": intent, "sec_per_query": round(secs / n, 2), "hybrid": hybrid,
+                              "mode": mode, "reranker": reranker or (cfg.rerank or {}).get("model"),
+                              "golden": str(golden)}
+    if classes != ["unclassified"]:
+        result["by_class"] = by_class
+    if neg:
+        def med(rs: list[dict]) -> float | None:
+            v = [float(r["top_rerank"]) for r in rs if r.get("top_rerank") is not None]
+            return round(statistics.median(v), 3) if v else None
+        result["negatives"] = {"n": len(neg), "top_rerank_median": med(neg), "answerable_top_rerank_median": med(pos),
+                               "evidence": neg_verdicts}
+    result["rows"] = rows
     if not record:
         return result
     hist = safeio.check(cfg, cfg.log_dir / "eval_history.jsonl")
     prev = None
-    if hist.is_file():
-        lines = hist.read_text(encoding="utf-8").strip().splitlines()
-        if lines:
-            prev = json.loads(lines[-1])
+    if hist.is_file():                    # the last run on the same questions: a delta against another set means nothing
+        for line in reversed(hist.read_text(encoding="utf-8").strip().splitlines()):
+            rec = json.loads(line) if line.strip() else None
+            if isinstance(rec, dict) and rec.get("golden") == result["golden"]:
+                prev = rec
+                break
     if prev:
         result["delta_recall@10"] = round(result["recall@10"] - prev.get("recall@10", 0), 3)
         result["delta_mrr"] = round(result["mrr"] - prev.get("mrr", 0), 3)

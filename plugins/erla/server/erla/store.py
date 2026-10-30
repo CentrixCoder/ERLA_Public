@@ -360,39 +360,64 @@ def fts_check(con: sqlite3.Connection, sample: int = 400) -> tuple[bool, str]:
         return False, str(exc)
 
 
+_FTS_DDL = [s.strip() + ";" for s in SCHEMA.split(";") if "VIRTUAL TABLE IF NOT EXISTS chunks_fts" in s]
+
+
 def fts_rebuild(con: sqlite3.Connection, log=print, batch: int = 5000) -> int:
     """Rebuild contentless chunks_fts from chunks + documents (index-only write, G1.2), always at the
-    current FTS_VERSION. Drops and recreates the virtual table so no corrupted segment survives."""
-    con.execute("DROP TABLE IF EXISTS chunks_fts")
-    con.executescript(SCHEMA)          # recreates chunks_fts only (other tables exist)
-    rows = con.execute(
-        "SELECT c.chunk_id, c.text, d.title, d.path, d.rel_path FROM chunks c "
-        "JOIN documents d ON d.doc_id = c.doc_id ORDER BY c.chunk_id")
-    v = fts_version(con)
-    n = 0
-    buf = []
-    for r in rows:
-        buf.append((r["chunk_id"], *fts_columns(v, r["text"], r["title"], r["path"], r["rel_path"])))
-        if len(buf) >= batch:
+    current FTS_VERSION. Drops and recreates the virtual table so no corrupted segment survives.
+    One transaction: searches (WAL readers) keep the old table until the new one is complete, and an
+    interrupted rebuild rolls back to it, so the next refresh upgrades again (0.7.0 committed the empty
+    table first)."""
+    con.commit()                       # nothing of the caller's rides in this transaction
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        con.execute("DROP TABLE IF EXISTS chunks_fts")
+        for ddl in _FTS_DDL:           # executescript would commit the drop on its own
+            con.execute(ddl)
+        rows = con.execute(
+            "SELECT c.chunk_id, c.text, d.title, d.path, d.rel_path FROM chunks c "
+            "JOIN documents d ON d.doc_id = c.doc_id ORDER BY c.chunk_id")
+        v = fts_version(con)
+        n = 0
+        buf = []
+        for r in rows:
+            buf.append((r["chunk_id"], *fts_columns(v, r["text"], r["title"], r["path"], r["rel_path"])))
+            if len(buf) >= batch:
+                con.executemany("INSERT INTO chunks_fts(rowid, text, title, path) VALUES (?,?,?,?)", buf)
+                n += len(buf)
+                buf.clear()
+                log(f"  fts rebuild: {n} chunks")
+        if buf:
             con.executemany("INSERT INTO chunks_fts(rowid, text, title, path) VALUES (?,?,?,?)", buf)
             n += len(buf)
-            buf.clear()
-            log(f"  fts rebuild: {n} chunks")
-    if buf:
-        con.executemany("INSERT INTO chunks_fts(rowid, text, title, path) VALUES (?,?,?,?)", buf)
-        n += len(buf)
-    con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')")
-    set_meta(con, "fts_version", str(v))
-    con.commit()
+        con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')")
+        set_meta(con, "fts_version", str(v))
+        con.commit()
+    except BaseException:
+        con.rollback()
+        raise
     return n
 
 
+def _fts_emptied(con: sqlite3.Connection) -> bool:
+    """chunks_fts holds no row while chunks exist: what an interrupted 0.7.0 rebuild left committed."""
+    return (has_table(con, "chunks_fts_docsize")
+            and con.execute("SELECT 1 FROM chunks_fts_docsize LIMIT 1").fetchone() is None
+            and con.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None)
+
+
 def fts_upgrade_if_stale(con: sqlite3.Connection, log=print) -> int:
-    """Rebuild chunks_fts when it predates FTS_VERSION (writer connections; index only, no library file
-    is read). Returns the number of chunks re-indexed, 0 when already current."""
-    if not has_table(con, "chunks_fts") or fts_version(con) >= FTS_VERSION:
+    """Rebuild chunks_fts when it predates FTS_VERSION, or is empty while chunks exist (writer connections;
+    index only, no library file is read). Returns the number of chunks re-indexed, 0 when already current."""
+    if not has_table(con, "chunks_fts"):
         return 0
-    log(f"fts: upgrading the full-text index to version {FTS_VERSION} (punctuation and compound words)")
+    if fts_version(con) < FTS_VERSION:
+        log(f"fts: upgrading the full-text index to version {FTS_VERSION} (punctuation and compound words)")
+    elif _fts_emptied(con):
+        log("fts: the full-text index is empty (an interrupted upgrade); rebuilding it from stored text")
+    else:
+        return 0
     return fts_rebuild(con, log=log)
 
 

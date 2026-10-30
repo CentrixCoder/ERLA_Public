@@ -650,6 +650,12 @@ def cmd_eval(a) -> int:
         golden = core_dir() / "eval" / "golden_queries.yaml"
     res = run_eval(con, cfg, golden, hybrid=not a.no_vector, rerank=False if a.no_rerank else None,
                    reranker=a.reranker, memory=a.memory, intent=a.intent)
+    if getattr(a, "compare", None):
+        from .evaluate import compare_runs
+        res["compare"] = {"base": a.compare,
+                          **compare_runs(json.loads(Path(a.compare).read_text(encoding="utf-8")), res)}
+    if getattr(a, "save", None):
+        safeio.write_text(cfg, a.save, json.dumps(res, indent=2, default=str))
     _out(json.dumps(res, indent=2, default=str))
     return 0
 
@@ -910,6 +916,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--memory", action="store_true", help="include the source memory (off: it would learn the answers)")
     s.add_argument("--intent", choices=["property", "research", "locate", "item"], default=None,
                    help="ranking profile for every query; 'item' uses each golden item's own intent (0.7.0)")
+    s.add_argument("--save", help="write the full result, with per-question rows, to this JSON file (for --compare)")
+    s.add_argument("--compare", help="paired difference against a run saved with --save (95%% bootstrap interval)")
     s.set_defaults(fn=cmd_eval)
 
     s = sub.add_parser("memory", help="source memory: list what verified answers taught the ranking, or forget one")
