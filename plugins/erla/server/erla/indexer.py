@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import props, safeio, store, tables, xcache
+from . import props, refs, safeio, store, tables, xcache
 from .classify import (classify_document, copy_group_flags, detect_markings, detect_standard, guess_year,
                        most_restrictive)
 from .config import Config
@@ -187,6 +187,7 @@ class Indexer:
         self.heartbeat = heartbeat or (lambda: None)   # S5: progress signal for the refresh lock
         self.con = store.connect_writer(cfg)
         self._com: dict[str, ComWorker] = {}
+        self._ref_rules = refs.site_rules(cfg)          # citation patterns, read once per run
 
     # ------------------------------------------------------------ writing
     def _write(self, path: Path, rel: str, size: int, mtime: float, sha: str,
@@ -228,13 +229,17 @@ class Indexer:
         new_id = cur.lastrowid
         con.executemany("INSERT OR REPLACE INTO duplicates(doc_id, canonical_doc_id, kind) VALUES (?,?,'exact')",
                         [(c, new_id) for c in copies])
-        ftitle = store.fts_title(str(title), str(path), rel)
+        fv = store.fts_version(con)
+        fts_rows: list[tuple[int, str | None]] = []
         for seq, ch in enumerate(res.chunks):
             c = con.execute("INSERT INTO chunks(doc_id, seq, locator, text, units_detected, has_table, quality_json) "
                             "VALUES (?,?,?,?,?,?,?)",
                             (new_id, seq, ch.locator, ch.text, ch.units, int(ch.has_table),
                              json.dumps(ch.quality) if ch.quality else None))
-            con.execute("INSERT INTO chunks_fts(rowid, text, title) VALUES (?,?,?)", (c.lastrowid, ch.text, ftitle))
+            fts_rows.append((int(c.lastrowid or 0), ch.text))
+        store.fts_insert(con, fts_rows, str(title), str(path), rel, fv)
+        refs.record_document(con, int(new_id or 0), [ch.text for ch in res.chunks], std,   # Phase 4.4
+                             self._ref_rules)
         if any(ch.has_table and "|" in ch.text for ch in res.chunks):
             props.extract_document(con, new_id)                       # A3
         if ext == "pdf" and res.status == "ok":
@@ -246,8 +251,7 @@ class Indexer:
             # keep the document findable by name/path even with no extractable text
             c = con.execute("INSERT INTO chunks(doc_id, seq, locator, text) VALUES (?,?,?,?)",
                             (new_id, 0, "file", f"{title}\n{rel}"))
-            con.execute("INSERT INTO chunks_fts(rowid, text, title) VALUES (?,?,?)",
-                        (c.lastrowid, f"{title}\n{rel}", ftitle))
+            store.fts_insert(con, [(int(c.lastrowid or 0), f"{title}\n{rel}")], str(title), str(path), rel, fv)
         return new_id
 
     def _added_at(self, doc_id: int | None) -> str:
@@ -293,16 +297,10 @@ class Indexer:
         tail = "\n".join(texts[-2:]) if len(texts) > 2 else ""
         flag = self.cfg.path_flag(rel) or detect_markings(head, tail) or d["classification_flag"]
         cls = classify_document(rel, d["ext"] or path.suffix.lower().lstrip("."), d["title"] or path.stem, head)
-        old_t = store.fts_title(d["title"], d["path"], d["rel_path"])
-        new_t = store.fts_title(d["title"], str(path), rel)
-        rowid_del = store.fts_rowid_delete(con)
-        for c in chunks:
-            if rowid_del:
-                con.execute("DELETE FROM chunks_fts WHERE rowid=?", (c["chunk_id"],))
-            else:
-                con.execute("INSERT INTO chunks_fts(chunks_fts, rowid, text, title) VALUES('delete', ?, ?, ?)",
-                            (c["chunk_id"], c["text"], old_t))
-            con.execute("INSERT INTO chunks_fts(rowid, text, title) VALUES (?,?,?)", (c["chunk_id"], c["text"], new_t))
+        rows = [(int(c["chunk_id"]), c["text"]) for c in chunks]
+        fv = store.fts_version(con)
+        store.fts_delete(con, rows, d["title"], d["path"], d["rel_path"], fv)
+        store.fts_insert(con, rows, d["title"], str(path), rel, fv)
         con.execute(
             "UPDATE documents SET path=?, rel_path=?, size=?, mtime=?, classification_flag=?, doc_type=?, "
             "discipline=?, authority_tier=?, top_folder=?, indexed_at=? WHERE doc_id=?",

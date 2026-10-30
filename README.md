@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.7.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,26 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.7.0
+
+- **Search finds what it used to miss.** A word at the end of a sentence ("was measured.") and the parts of a
+  compound name (`MMPDS` in `MMPDS-17`, `7075` in `7075-T651`) are found; exact matches still work.
+- **Keyword ranking is exact BM25F** with the Lucene IDF, scored over every chunk that contains a query term (no
+  600-row limit before scoring). k1, b and the field weights (text, title, path) are settings in the site
+  configuration (`search.bm25`).
+- **Meaning-based search covers whole pages.** Each chunk is embedded in overlapping windows that start with the
+  document title, standard number and page, instead of only its first 2,000 characters; the re-ranker reads the
+  title too.
+- **Better answers from one search.** `library_search` takes the kind of question (`intent`: property, research,
+  locate) and its variants (`queries`) in one call, and returns an `evidence` verdict (STRONG, PARTIAL, WEAK,
+  NONE) with the next step.
+- **Citation graph.** `library_refs` lists a standard, book, specification or regulation's editions in your library
+  and the documents that cite it, with the edition each cites ("Peterson, 3rd ed.", MIL-PRF-23377J, AC 20-107B,
+  company spec numbers; your own numbering schemes under `refs.patterns`).
+- **Feedback follows the file** and, with your question, counts only for that topic.
+- **Upgrade:** run `erla refresh` once after updating (it rebuilds the search index and re-embeds every chunk;
+  allow an hour or more on a large library).
+
 ### 0.6.0
 
 - **Old Word (`.doc`) files are read completely again.** When Word was slow to respond, ERLA read some `.doc`
@@ -26,12 +46,6 @@ Updated automatically at every release; older versions are listed under
 ### 0.5.10
 
 - Maintenance release: no change to the free edition.
-
-### 0.5.9
-
-- **Word and PowerPoint files.** When ERLA reads an Office file it now closes only the Word or PowerPoint it
-  started itself. A Word you opened at the same moment is no longer closed, and a busy Office start is retried.
-- The free edition now runs entirely in Python; nothing to install or change.
 
 <!-- release-notes:end -->
 

@@ -570,6 +570,7 @@ const PANEL_EMPTY: PanelView = {
   tools: null,
   toolsError: null,
   confirmAccept: null,
+  toolNote: null,
   busy: null,
   message: null,
   pressed: null,
@@ -839,9 +840,15 @@ type ToolResult = { ok?: boolean; error?: string; url?: string | null; already_r
 
 const lastLines = (lines: string[] | undefined, n = 3) => (lines ?? []).filter(l => l.trim()).slice(-n).join(' | ')
 
+// what a tool's button says goes in that tool's card as well as the message line, where it stays after the
+// Button's outcome word fades
+const toolSay = ($: EngineInterface, t: EngTool, text: string, isError = false) =>
+  setPanel($, { message: { text, isError }, toolNote: { id: t.id, text, isError } })
+
 function toolAction($: EngineInterface, t: EngTool, action: 'start' | 'stop' | 'test'): Promise<string | void> {
   const busy = { start: `Starting ${t.name}…`, stop: `Stopping ${t.name}…`, test: `Running ${t.name}'s tests…` }[action]
   return panelAct($, busy, async () => {
+    await setPanel($, { toolNote: null })
     let res: ToolResult
     const args = { tool_id: t.id }
     try {
@@ -850,24 +857,27 @@ function toolAction($: EngineInterface, t: EngTool, action: 'start' | 'stop' | '
         : action === 'stop' ? await call<ToolResult>($, 'engtools_stop', args)
           : await call<ToolResult>($, 'engtools_test', args)
     } catch (err) {
-      await say($, explain(`engtools_${action}`, err), true)
+      await toolSay($, t, explain(`engtools_${action}`, err), true)
       return
     }
     await refreshTools($)
     if (res.ok === false) {
-      await say($, `${t.name}: ${res.error ?? `${action} failed`}${res.test?.output || res.output ? ` — ${lastLines(res.test?.output ?? res.output)}` : ''}`, true)
+      await toolSay($, t, `${t.name} did not ${action === 'test' ? 'run its tests' : action}: ${res.error ?? `${action} failed`}${res.test?.output || res.output ? ` — ${lastLines(res.test?.output ?? res.output)}` : ''}`, true)
       return
     }
     if (action === 'start') {
-      await say($, `${t.name} ${res.already_running ? 'is already running' : 'started'}: open ${res.url ?? 'its link'} (on this computer only).`)
-      return res.already_running ? 'Running' : 'Started'
+      // Open means open: once the tool answers, its page opens in the browser (the refreshed entry has the opener)
+      const now = (await read($, panel))?.tools?.find(x => x.id === t.id)
+      const url = res.url ?? now?.url ?? t.url
+      const opened = await openInBrowser($, { ...t, ...now, url })
+      return opened ?? 'Not opened'
     }
     if (action === 'stop') {
-      await say($, res.stopped ? `${t.name} stopped.` : `${t.name} was not running.`)
+      await toolSay($, t, res.stopped ? `${t.name} stopped.` : `${t.name} was not running.`)
       return res.stopped ? 'Stopped' : 'Not running'
     }
     const passed = res.test?.ok === true
-    await say($, passed
+    await toolSay($, t, passed
       ? `${t.name}: tests passed in ${res.test?.seconds ?? '?'} s. Review its scope and limits, then press Accept to allow it to start.`
       : `${t.name}: tests failed (exit ${res.test?.exit ?? '?'}) — ${lastLines(res.test?.output)}`, !passed)
     return passed ? 'Passed' : 'Failed'
@@ -878,13 +888,13 @@ async function acceptTool($: EngineInterface, t: EngTool): Promise<string | void
   const v = (await read($, panel)) ?? PANEL_EMPTY
   if (v.confirmAccept !== t.id) {
     await setPanel($, { confirmAccept: t.id })
-    await say($, `Accept ${t.name} ${t.version}? Its tests passed on these exact files. Accepting lets it start from this panel ` +
+    await toolSay($, t, `Accept ${t.name} ${t.version}? Its tests passed on these exact files. Accepting lets it start from this panel ` +
       'or when you ask ERLA; it is decision support, not a certified program. Press Accept again to confirm.')
     return 'Press again'
   }
   await setPanel($, { confirmAccept: null })
   if (!t.acceptArgv) {
-    await say($, 'This ERLA server did not say how to accept the tool; run `erla tools accept` in a terminal.', true)
+    await toolSay($, t, 'This ERLA server did not say how to accept the tool; run `erla tools accept` in a terminal.', true)
     return
   }
   return panelAct($, `Accepting ${t.name}…`, async () => {
@@ -893,7 +903,7 @@ async function acceptTool($: EngineInterface, t: EngTool): Promise<string | void
       out = await $.process.run(t.acceptArgv ?? [], { timeoutMs: 120_000 })
     } catch (err) {
       // no local commands on this surface: say so and give the command (L10: never a silent fallback)
-      await say($, `This surface cannot run commands, so the panel cannot accept the tool here (${err instanceof Error ? err.message : String(err)}). ` +
+      await toolSay($, t, `This surface cannot run commands, so the panel cannot accept the tool here (${err instanceof Error ? err.message : String(err)}). ` +
         `In a terminal on this computer run: erla tools accept ${t.id} --sha <hash from erla tools list>`, true)
       return
     }
@@ -905,10 +915,10 @@ async function acceptTool($: EngineInterface, t: EngTool): Promise<string | void
     }
     await refreshTools($)
     if (out.exitCode !== 0 || res.ok === false) {
-      await say($, `${t.name} was not accepted: ${res.error ?? `exit code ${out.exitCode}`}`, true)
+      await toolSay($, t, `${t.name} was not accepted: ${res.error ?? `exit code ${out.exitCode}`}`, true)
       return
     }
-    await say($, `${t.name} ${t.version} accepted: press Open to start it.`)
+    await toolSay($, t, `${t.name} ${t.version} accepted: press Open to start it.`)
     return 'Accepted'
   })
 }
@@ -917,7 +927,7 @@ async function acceptTool($: EngineInterface, t: EngTool): Promise<string | void
 // https addresses only), so the button runs the server's browser opener on this computer
 async function openInBrowser($: EngineInterface, t: EngTool): Promise<string | void> {
   if (!t.openArgv || !t.url) {
-    await say($, `This ERLA server did not say how to open a browser here: copy the link and open ${t.url ?? 'it'} in your browser.`, true)
+    await toolSay($, t, `${t.name} is running, but this ERLA server did not say how to open a browser here: copy the link and open ${t.url ?? 'it'} in your browser.`, true)
     return
   }
   try {
@@ -925,16 +935,16 @@ async function openInBrowser($: EngineInterface, t: EngTool): Promise<string | v
     if (out.exitCode !== 0) throw new Error(`${t.openArgv[0]} exit code ${out.exitCode}${out.stderr.trim() ? `: ${out.stderr.trim()}` : ''}`)
   } catch (err) {
     // L10: never a silent fallback; the address is in the card to copy
-    await say($, `Could not open your browser (${err instanceof Error ? err.message : String(err)}): copy the link and open ${t.url} yourself.`, true)
+    await toolSay($, t, `${t.name} is running, but your browser did not open (${err instanceof Error ? err.message : String(err)}): copy the link and open ${t.url} yourself.`, true)
     return
   }
-  await say($, `${t.name} opened in your browser at ${t.url} (on this computer only).`)
+  await toolSay($, t, `${t.name} opened in your browser at ${t.url} (on this computer only).`)
   return 'Opened'
 }
 
 async function copyToolLink($: EngineInterface, t: EngTool, surface: Parameters<EngineInterface['ui']['copy']>[0]['surface']): Promise<string> {
   const res = await $.ui.copy({ text: t.url ?? '', surface })
-  await say($, res.isCopied ? `${t.name} link copied: paste it in your browser.` : `Could not copy the link here: open ${t.url} in your browser.`, !res.isCopied)
+  await toolSay($, t, res.isCopied ? `${t.name} link copied: paste it in your browser.` : `Could not copy the link here: open ${t.url} in your browser.`, !res.isCopied)
   return res.isCopied ? 'Copied' : 'Not copied'
 }
 
@@ -1138,6 +1148,9 @@ function registerPanel(on: Parameters<Register>[0]): void {
                       ? null
                       : button(`tool-test-${t.id}`, 'Run tests', 'secondary', () => void press($, `tool-test-${t.id}`, 'Testing…', () => toolAction($, t, 'test')), { scope: 'tool-test' })}
                   </Box>
+                  {v.toolNote?.id === t.id
+                    ? <Text key={`tool-note-${t.id}`} color={v.toolNote.isError ? 'error' : 'subtle'}>{v.toolNote.text}</Text>
+                    : null}
                 </Box>
               )
             }),

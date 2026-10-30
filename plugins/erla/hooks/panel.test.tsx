@@ -91,6 +91,8 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
     artifacts: '' as string, artifactCalls: [] as Record<string, unknown>[],
     // engtools_list's answer; null = a server without Engineer Tools (the free core edition)
     tools: null as unknown,
+    // engtools_start's answer, and the list a started tool shows afterwards (null: the list does not change)
+    startRes: { ok: true, url: 'http://127.0.0.1:8050/' } as unknown, toolsAfterStart: null as unknown,
     // commands the panel ran with $.process.run, what they answer, and whether this surface refuses them
     runs: [] as string[][], runOut: { exitCode: 0, stdout: '{"ok": true}', stderr: '' }, runFails: false }
   on('tool.list', () => ({ value: [] }))
@@ -108,13 +110,14 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
       return { deny: `$.mcp.call: no connected MCP tool "${e.tool}" on a server named "plugin:erla:erla"` }
     }
     if (e.tool === rec.refuse) return { deny: 'The server-side auto mode classifier gave no verdict' }
+    if (e.tool === 'engtools_start' && rec.toolsAfterStart !== null) rec.tools = rec.toolsAfterStart
     const out: Record<string, unknown> = {
       library_stats: { text: STATS, last_eval: rec.lastEval },
       site_info: { unit_system: 'US', library_roots: ['D:\\Lib'], erla_version: '0.2.9', check_policy: 'always',
         ...(rec.tools !== null ? { engineer_tools: true } : {}) },
       ...(rec.tools !== null ? {
         engtools_list: rec.tools,
-        engtools_start: { ok: true, url: 'http://127.0.0.1:8050/' },
+        engtools_start: rec.startRes,
         engtools_stop: { ok: true, stopped: true },
         engtools_test: { ok: true, test: { ok: true, exit: 0, seconds: 1.4, output: ['8 passed'] } },
       } : {}),
@@ -902,9 +905,14 @@ for (const state of ['core', 'stub', 'disconnected'] as const) {
   })
 }
 
-test('Engineer Tools: Open starts an accepted tool; draft and changed tools cannot be opened', async ($, on) => {
+// 2026-10-23: Open started the tool but only said its address at the panel's foot; Open now opens the page
+test('Engineer Tools: Open starts an accepted tool and opens it in the browser; draft and changed tools cannot be opened', async ($, on) => {
   const rec = fake(on)
+  const url = 'http://127.0.0.1:8050/'
+  const opener = ['rundll32.exe', 'url.dll,FileProtocolHandler', url]
   rec.tools = { tools: [tool('beam', 'accepted'), tool('lug', 'draft'), tool('weld', 'modified')] }
+  rec.toolsAfterStart = { tools: [tool('beam', 'accepted', { running: true, url, open_argv: opener }), tool('lug', 'draft'), tool('weld', 'modified')] }
+  rec.runOut = { exitCode: 0, stdout: '', stderr: '' }
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.command.run({ command: 'erla', args: '' } as never)
   const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
@@ -918,8 +926,39 @@ test('Engineer Tools: Open starts an accepted tool; draft and changed tools cann
   await ui.press({ key: 'tool-open-beam' })
   await rec.clock.settle()
   expect(rec.mcp).toContain('engtools_start {"tool_id":"beam"}')
-  expect(await ui.find({ type: 'Text', text: /started: open http:\/\/127\.0\.0\.1:8050\// })).toBeDefined()
-  expect(rec.runs).toEqual([])                                   // starting never runs a local command
+  expect(rec.runs).toEqual([opener])                             // only the server's browser opener runs
+  expect(await ui.find({ type: 'Text', text: /^I-beam Timoshenko analyzer opened in your browser at http:\/\/127\.0\.0\.1:8050\// })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'tool-browse-beam', text: /Opened/ })).toBeUndefined()   // Open's own Button said it
+  await ui.unmount()
+})
+
+// 2026-10-23: a dev preview held port 8050; engtools_start refused, the refusal went to the message line at the
+// panel's foot and the Button's "Failed" faded, so pressing Open looked like nothing happened
+test('Engineer Tools: a refused Open says why in the card of that tool, and it stays after the Button fades', async ($, on) => {
+  const rec = fake(on)
+  rec.tools = { tools: [tool('beam', 'accepted'), tool('lug', 'accepted')] }
+  rec.startRes = { ok: false, id: 'beam', error: 'port 8050 on 127.0.0.1 is already in use by PID 4242 (python.exe app.py); stop that program, then start I-beam Timoshenko analyzer again' }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await rec.clock.settle()
+  await ui.press({ key: 'tool-open-beam' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Button', key: 'tool-open-beam', text: /Failed/ })).toBeDefined()
+  await rec.clock.advance(FLASH_MS)
+  expect(await ui.find({ type: 'Button', key: 'tool-open-beam', text: /^Open$/ })).toBeDefined()
+  // the card's note has no mark; the message line at the panel's foot starts with one
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => String(t.text))
+  const note = texts.findIndex(t => /^I-beam Timoshenko analyzer did not start: port 8050 .*in use by PID 4242/.test(t))
+  expect(note).toBeGreaterThan(texts.indexOf('I-beam Timoshenko analyzer'))       // in the pressed tool's card,
+  expect(note).toBeLessThan(texts.indexOf('lug'))                                   // not the next one's
+  expect(rec.runs).toEqual([])                                   // nothing opened
+
+  // pressing it again clears the old reason before the new answer comes
+  rec.startRes = { ok: true, url: 'http://127.0.0.1:8050/' }
+  await ui.press({ key: 'tool-open-beam' })
+  await rec.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^I-beam Timoshenko analyzer did not start/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -1024,7 +1063,7 @@ test('Engineer Tools: a running tool opens in the browser through the server\'s 
   await rec.clock.advance(FLASH_MS)
   await ui.press({ key: 'tool-browse-beam' })
   await rec.clock.settle()
-  expect(await ui.find({ type: 'Text', text: /Could not open your browser .*open http:\/\/127\.0\.0\.1:8050\/ yourself/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /browser did not open .*open http:\/\/127\.0\.0\.1:8050\/ yourself/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'tool-browse-beam', text: /Failed/ })).toBeDefined()
   await ui.unmount()
 })

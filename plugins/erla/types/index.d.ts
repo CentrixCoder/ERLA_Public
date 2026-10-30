@@ -147,6 +147,9 @@ export type PanelView = {
   toolsError: string | null
   // the tool whose Accept was pressed once: a second press accepts it (the user's decision, ET3)
   confirmAccept: string | null
+  // the last thing a tool's own button said, shown in that tool's card: on 2026-10-23 Open's refusal (a busy
+  // port) went only to the message line at the panel's foot, and pressing Open looked like nothing happened
+  toolNote: { id: string; text: string; isError: boolean } | null
   busy: string | null
   message: { text: string; isError: boolean } | null
   // the Button press the panel is showing on that Button, null when none

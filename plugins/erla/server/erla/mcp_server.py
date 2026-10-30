@@ -467,35 +467,59 @@ def t_library_stats() -> dict:
 
 def t_library_search(query: str, k: int = 20, types: list[str] | None = None, tiers: list[str] | None = None,
                      year_min: int | None = None, discipline: str | None = None,
-                     exclude_flagged: bool = False, hybrid: bool = True, reranker: str | None = None) -> dict:
-    from . import report
-    from .search import search
+                     exclude_flagged: bool = False, hybrid: bool = True, reranker: str | None = None,
+                     intent: str | None = None, queries: list[str] | None = None) -> dict:
+    from . import refs, report
+    from .search import INTENTS, evidence, search
     cfg = _cfg()
     con = _con(cfg)
+    if intent and intent not in INTENTS and intent not in ((cfg.search or {}).get("profiles") or {}):
+        return {"error": f"unknown intent '{intent}'", "intents": list(INTENTS)}
+    subs = [q for q in (queries or []) if isinstance(q, str) and q.strip()][:8]
     hits, exp, mode = search(
         con, query, k=k, types=[t.lower().lstrip(".") for t in types] if types else None,
         tiers=[t.upper() for t in tiers] if tiers else None, year_min=year_min, discipline=discipline,
-        exclude_flagged=exclude_flagged, boosts=report.feedback_boosts(cfg), cfg=cfg,
-        hybrid=hybrid and bool(cfg.embeddings.get("enabled")), reranker=reranker or None)
+        exclude_flagged=exclude_flagged, boosts=report.feedback_boosts(cfg, con, query), cfg=cfg,
+        hybrid=hybrid and bool(cfg.embeddings.get("enabled")), reranker=reranker or None,
+        intent=intent or None, queries=subs or None)
     last, age = _index_age_days(con)
+    cites = refs.cites_for(con, [h.doc_id for h in hits[:10]])
+    for h in hits:
+        if h.doc_id in cites:
+            h.cites = cites[h.doc_id]
     hd = [h.as_dict() for h in hits]
     from .search import tiers_view
     two_tier = tiers_view(hits)
+    ev = evidence(con, query, hits, mode, cfg)
     anomalies = []
     for i, h in enumerate(hd, 1):
         h["source_id"] = f"S{i}"
         anomalies += _anomalies(f"doc {h['doc_id']}", list(zip(h.get("locators", []), h.get("snippets", []))))
-    report.append_log(cfg, {"cmd": "mcp.search", "query": query, "expanded": exp.describe(), "mode": mode,
+    report.append_log(cfg, {"cmd": "mcp.search", "query": query, "sub_queries": subs, "intent": intent,
+                            "expanded": exp.describe(), "mode": mode, "evidence": ev["verdict"],
                             "k": k, "returned": [h["doc_id"] for h in hd],
                             "flags": sorted({h["flag"] for h in hd if h.get("flag")})})
-    return {"query": query, "index_date": last, "index_stale": age is None or age > cfg.stale_days,
+    return {"query": query, "sub_queries": subs, "intent": intent, "index_date": last,
+            "index_stale": age is None or age > cfg.stale_days,
             "mode": mode, "expanded_queries": exp.describe(), "hits": hd, "anomalies": anomalies,
-            "primary": two_tier["primary"], "corroborating": two_tier["corroborating"],
+            "primary": two_tier["primary"], "corroborating": two_tier["corroborating"], "evidence": ev,
             "note": "Snippets are for ranking only. Open every hit you cite with library_show (R3.3). "
                     "primary: the best-supported source for the query; corroborating: relevant T1/T2 sources "
-                    "to confirm it with (doc_ids among the hits). "
+                    "to confirm it with (doc_ids among the hits). evidence: how well the hits cover the question "
+                    "(STRONG / PARTIAL / WEAK / NONE) and the next step; a ranking aid, never a citation. "
+                    "cites: library documents that are standards a hit cites (open them before citing). "
                     "Hits with a flag are local-only: never put their text, titles or file names in web "
                     "queries (G2)."}
+
+
+def t_library_refs(standard: str, k: int = 50) -> dict:
+    """Phase 4.4: the library's editions of a standard and the documents that cite it."""
+    from . import refs
+    cfg = _cfg()
+    con = _con(cfg)
+    out = refs.library_refs(con, standard, k=k, cfg=cfg)
+    out["anomalies"] = _anomalies("refs", [(str(c["doc_id"]), c["title"] or "") for c in out.get("cited_by", [])])
+    return out
 
 
 def t_chart_read(doc_id: int, locator: str, x: float, color: str, region: list[float] | None = None,
@@ -513,7 +537,8 @@ def t_reranker_status() -> dict:
             "rerankers": [rerank.status(k) for k in rerank.RERANKERS]}
 
 
-def t_library_show(doc_id: int, locator: str | None = None, context: int = 0, chars: int = 6000) -> dict:
+def t_library_show(doc_id: int, locator: str | None = None, context: int = 0, chars: int = 6000,
+                   page_context: bool = True) -> dict:
     cfg = _cfg()
     con = _con(cfg)
     d = con.execute("SELECT * FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
@@ -538,10 +563,14 @@ def t_library_show(doc_id: int, locator: str | None = None, context: int = 0, ch
         return {"document": meta, "error": f"locator '{locator}' not found",
                 "available": [r["locator"] for r in rows[:120]]}
     seqs = {r["seq"] for r in sel}
+    asked = set(seqs)
     if context:
         seqs |= {s + o for s in list(seqs) for o in range(-context, context + 1)}
+    if page_context and not context:
+        seqs |= _page_siblings(rows, sel)
     from .cli import _quality_lines
     chunks = [{"locator": r["locator"], "text": r["text"][:chars],
+               **({"context": True} if r["seq"] not in asked else {}),
                **({"quality_warnings": _quality_lines(r["quality_json"])} if r["quality_json"] else {})}
               for r in rows if r["seq"] in seqs]
     return {"document": meta,
@@ -550,6 +579,30 @@ def t_library_show(doc_id: int, locator: str | None = None, context: int = 0, ch
                       + (f" FLAGGED {flag}: local-only (G2)." if flag else ""),
             "chunks": chunks,
             "anomalies": _anomalies(f"doc {doc_id}", [(c["locator"], c["text"]) for c in chunks])}
+
+
+PAGE_CONTEXT_CHARS = 800      # a matched chunk shorter than this brings its page siblings along (Phase 4.3)
+
+
+def _page_siblings(rows, sel) -> set[int]:
+    """Small-to-big (Phase 4.3): a short matched chunk (a table, a split page part) is returned with the
+    other chunks of the same page ('p.6' with 'p.6 table 1', 'p.6 part 2'), marked context: true, so the
+    agent reads the table and its caption or the paragraph around it without a second call."""
+    import re as _re
+    out: set[int] = set()
+    page = _re.compile(r"^(p\.\s*[\w.]+)")
+    for s in sel:
+        if len(s["text"] or "") >= PAGE_CONTEXT_CHARS:
+            continue
+        m = page.match(str(s["locator"]))
+        if not m:
+            continue
+        stem = m.group(1).lower()
+        for r in rows:
+            loc = str(r["locator"]).lower()
+            if loc == stem or loc.startswith(stem + " "):
+                out.add(r["seq"])
+    return out
 
 
 def t_library_properties(quantity: str | None = None, material: str | None = None, basis: str | None = None,
@@ -585,7 +638,7 @@ def t_library_files(query: str, k: int = 50) -> dict:
     from .search import search
     cfg = _cfg()
     con = _con(cfg)
-    hits, exp, _ = search(con, query, k=k, cfg=cfg)
+    hits, exp, _ = search(con, query, k=k, cfg=cfg, intent="locate")   # F9: an inventory needs no re-ranker
     groups: dict[str, list] = {}
     for h in hits:
         groups.setdefault(h.doc_type, []).append(
@@ -714,10 +767,11 @@ def t_check_reveal(check_id: str) -> dict:
 
 def t_check_close(check_id: str, verdict: str, findings: list[dict] | None = None,
                   checker: str = "erla:professor", notes: list[dict] | None = None, model: str = "",
-                  model_id: str = "") -> dict:
+                  model_id: str = "", coverage_audited: bool = False) -> dict:
     from . import checkgate
     try:
-        return checkgate.close(_cfg(), check_id, verdict, findings, checker, notes, model, model_id)
+        return checkgate.close(_cfg(), check_id, verdict, findings, checker, notes, model, model_id,
+                               coverage_audited)
     except checkgate.CheckError as exc:
         return {"error": str(exc)}
 
@@ -730,12 +784,19 @@ def t_check_status(check_id: str) -> dict:
         return {"error": str(exc)}
 
 
-def t_record_feedback(doc_id: int, verdict: str, note: str = "") -> dict:
-    from .report import append_log
+def t_record_feedback(doc_id: int, verdict: str, note: str = "", query: str = "") -> dict:
+    from .report import append_log, feedback_record
     if verdict not in ("useful", "not_useful"):
         return {"error": "verdict must be 'useful' or 'not_useful'"}
-    return {"logged_to": str(append_log(_cfg(), {"doc_id": doc_id, "verdict": verdict, "note": note},
-                                        "feedback.jsonl"))}
+    cfg = _cfg()
+    try:
+        con = _con(cfg)
+    except Exception:                       # no index yet: log the vote as before (doc_id only)
+        con = None
+    rec = feedback_record(con, doc_id, verdict, note, query)
+    return {"logged_to": str(append_log(cfg, rec, "feedback.jsonl")),
+            "applies_to": "queries on this topic" if rec.get("topic") else "every query (no question given)",
+            "follows_file": bool(rec.get("sha256"))}
 
 
 def t_record_lesson(specialist: str, kind: str, lesson: str, evidence: str = "", rule: str = "") -> dict:
@@ -910,7 +971,18 @@ def build_server():
         "embeddings, synonym expansion, tier ranking). Returns ranked hits with locators, tier, flag, "
         "snippets and the expanded query set. Filters: types (pdf, xlsx...), tiers (T1..T6), year_min, "
         "discipline, exclude_flagged; reranker (ms-marco default; bge-v2-m3 CPU option; qwen3-4b needs a "
-        "CUDA GPU) is normally set by the user's control panel - do not choose one yourself.", ro)
+        "CUDA GPU) is normally set by the user's control panel - do not choose one yourself. "
+        "intent: 'property' (a material allowable or tabulated value: tier order within the relevant hits), "
+        "'research' (methods, background, literature: editions of one standard folded into one hit) or "
+        "'locate' (find files, no re-ranking); omit when unsure. queries: up to 8 sub-queries or variants "
+        "(aliases, standard-number spellings, the parts of a multi-part question) fused with the main query "
+        "in one ranking and re-ranked against `query` - use this instead of several searches. Returns "
+        "evidence {verdict STRONG|PARTIAL|WEAK|NONE, next_step, coverage, top_relevance}: how well the hits "
+        "cover the question, a ranking aid and never a citation; and per hit `cites`: library documents that "
+        "are standards the hit cites.", ro)
+    reg(t_library_refs, "library_refs", "For a standard number (e.g. 'MIL-HDBK-5', 'ASTM E8'): the library's "
+        "editions of it and the documents that cite it, most mentions first (S9 supersession and follow-up "
+        "reading). An index of citations, not a source: open each document with library_show before citing.", ro)
     reg(t_chart_read, "chart_read", "Read y at x on ONE curve of a library figure (PDF page), or refuse. "
         "Gates: printed equation or table on the page first (G0; read only as cross_check), axis calibration "
         "from OCR'd tick labels (G2/G3), no extrapolation beyond the curve (G4), the curve identified by colour "
@@ -924,7 +996,8 @@ def build_server():
         "run on this computer (PyTorch, CUDA, GPU memory), with the fix when it cannot.", ro)
     reg(t_library_show, "library_show", "Open a document at a locator (e.g. 'p.287', 'Sheet1!A1:H40', "
         "'slide 12', EPUB 'p.69' or 'item 12 §3.4 Pivot Tables') and return the exact chunk text. Required before citing any value. Without a "
-        "locator, lists the document's locators.", ro)
+        "locator, lists the document's locators. A short matched chunk comes with the other chunks of its page "
+        "(page_context, marked context: true; cite the locator that holds the value).", ro)
     reg(t_library_files, "library_files", "File inventory for a topic (workflow W1): documents grouped "
         "by type with path, year, tier, flag, duplicate count.", ro)
     reg(t_library_stats, "library_stats", "Index coverage, OCR, duplicates, flags and staleness.", ro)
@@ -965,7 +1038,9 @@ def build_server():
     reg(t_check_open, "check_open", "Lead only (instructions W9): open an independent check of a draft "
         "packet - {question, inputs, sources, method, discipline, quantities: [{name, value, units, calc_id, "
         "source}], assumptions, conclusion}; a conclusion to compare (critical / not critical, separates / does "
-        "not) is a quantity with units 'decision' and its label as value. rework_of: the closed check this "
+        "not) is a quantity with units 'decision' and its label as value. For a margin, design value or "
+        "program also coverage: [{configuration, mode, status (COMPUTED / NOT CHECKED / REQUIRED INPUT), source, "
+        "reason}] (rules R4.7) and reports_margins: true. rework_of: the closed check this "
         "reworks (at most 2 rework rounds per stage); escalate_from: a closed Opus check that did not converge "
         "(the next check is the Professor on Fable). Returns check_id, stage and brief_part1 (no values).", wr)
     reg(t_check_status, "check_status", "State of an independent check; once closed, its verdict, the "
@@ -983,10 +1058,13 @@ def build_server():
         "reason; each quantity out of tolerance needs a finding; FAIL needs a finding that changes the "
         "answer. checker: erla:professor or self-check; model: the model you run on (opus or fable), which must "
         "match the check's stage; model_id: your exact model id (e.g. claude-opus-5-5), recorded and compared with "
-        "the calibrated models. Returns calibrated, and converged: false when ERLA and you do not correlate (5 % or more, "
+        "the calibrated models. coverage_audited: true when you compared the brief's coverage inventory with the "
+        "discipline's failure-mode catalogue (W9 step 3a); a margin, design-value or program check without it is "
+        "refused PASS. Returns calibrated, and converged: false when ERLA and you do not correlate (5 % or more, "
         "opposite signs or conclusions, or not checked) and the next step.", wr)
     reg(t_record_feedback, "record_feedback", "Record user feedback on a source: verdict 'useful' or "
-        "'not_useful' (rules R7.2).", wr)
+        "'not_useful' (rules R7.2); query = the user's question, so the vote counts for that topic only. The "
+        "vote follows the file's content, not its index row.", wr)
     reg_if(SPECIALISTS, t_record_lesson, "record_lesson", "Lead agent only: record a specialist lesson - kind "
         "'mistake', 'correction', 'method' or 'resource' - for specialist "
         + " or ".join(f"'{k}' ({sp['lesson_label']})" for k, sp in spec_on.items()) + ". Appends to "

@@ -56,22 +56,25 @@ def scan_document(con, row, cfg, max_tables: int = 8) -> tuple[int, int]:
             new_chunks += page_tables(page, loc, max_tables)
     old = con.execute("SELECT chunk_id, text FROM chunks WHERE doc_id=? AND has_table=1 AND locator LIKE '% table %' "
                       "AND quality_json LIKE '%\"table\"%'", (doc_id,)).fetchall()
-    ftitle = store.fts_title(row["title"], row["path"], row["rel_path"])
-    rowid_del = store.fts_rowid_delete(con)
+    fv = store.fts_version(con)
+    store.fts_delete(con, [(int(o["chunk_id"]), o["text"]) for o in old], row["title"], row["path"], row["rel_path"], fv)
     for o in old:
-        if rowid_del:
-            con.execute("DELETE FROM chunks_fts WHERE rowid=?", (o["chunk_id"],))
-        else:
-            con.execute("INSERT INTO chunks_fts(chunks_fts, rowid, text, title) VALUES('delete', ?, ?, ?)",
-                        (o["chunk_id"], o["text"], ftitle))
         con.execute("DELETE FROM embeddings WHERE chunk_id=?", (o["chunk_id"],))
+        if store.has_table(con, "sparse_vectors"):
+            con.execute("DELETE FROM sparse_vectors WHERE chunk_id=?", (o["chunk_id"],))
         con.execute("DELETE FROM chunks WHERE chunk_id=?", (o["chunk_id"],))
     seq = (con.execute("SELECT max(seq) FROM chunks WHERE doc_id=?", (doc_id,)).fetchone()[0] or 0) + 1
+    added: list[tuple[int, str | None]] = []
     for k, ch in enumerate(new_chunks):
         c = con.execute("INSERT INTO chunks(doc_id, seq, locator, text, units_detected, has_table, quality_json) "
                         "VALUES (?,?,?,?,?,1,?)",
                         (doc_id, seq + k, ch.locator, ch.text, ch.units, json.dumps(ch.quality) if ch.quality else None))
-        con.execute("INSERT INTO chunks_fts(rowid, text, title) VALUES (?,?,?)", (c.lastrowid, ch.text, ftitle))
+        added.append((int(c.lastrowid or 0), ch.text))
+    store.fts_insert(con, added, row["title"], row["path"], row["rel_path"], fv)
+    from . import refs                      # table chunks can cite standards too (Phase 4.4)
+    refs.record_document(con, doc_id, [r[0] or "" for r in con.execute(
+        "SELECT text FROM chunks WHERE doc_id=? ORDER BY seq", (doc_id,))], (con.execute("SELECT standard_id FROM documents WHERE doc_id=?", (doc_id,)).fetchone() or [None])[0],
+        refs.site_rules(cfg))
     n_props = props.extract_document(con, doc_id)
     con.execute("INSERT OR REPLACE INTO table_scan(doc_id, sha256, version, n_tables, n_props, scanned_at) "
                 "VALUES (?,?,?,?,?,?)", (doc_id, row["sha256"], TABLES_VERSION, len(new_chunks), n_props,

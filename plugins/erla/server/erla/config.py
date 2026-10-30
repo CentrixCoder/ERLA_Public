@@ -149,6 +149,9 @@ class Config:
     embeddings: dict[str, Any] = field(default_factory=dict)
     tables: dict[str, Any] = field(default_factory=dict)     # A2/A3: PDF table extraction, property store
     rerank: dict[str, Any] = field(default_factory=dict)     # A1: cross-encoder re-ranking
+    search: dict[str, Any] = field(default_factory=dict)     # 0.7.0: fusion, aggregation, diversity, profiles, evidence
+    sparse: dict[str, Any] = field(default_factory=dict)     # 0.7.0: opt-in learned sparse channel (erla.sparse)
+    refs: dict[str, Any] = field(default_factory=dict)       # 0.7.0: citation graph: site book names and spec patterns
     classification_path_rules: list[dict[str, str]] = field(default_factory=list)
     web: dict[str, Any] = field(default_factory=dict)
     check: dict[str, Any] = field(default_factory=dict)      # Professor check policy (ADR-0002; erla check-policy)
@@ -251,6 +254,9 @@ def load_config(path: Path | str | None = None, validate: bool = True) -> Config
         embeddings=raw.get("embeddings") or {},
         tables=raw.get("tables") or {},
         rerank=raw.get("rerank") or {},
+        search=raw.get("search") or {},
+        sparse=raw.get("sparse") or {},
+        refs=raw.get("refs") or {},
         classification_path_rules=raw.get("classification_path_rules") or [],
         web=raw.get("web") or {},
         check=chk if isinstance(chk := raw.get("check"), dict) else {},

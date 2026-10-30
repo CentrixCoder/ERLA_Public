@@ -131,6 +131,46 @@ def detect_standard(text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+_STD_DIGIT_SEP = re.compile(r"(?<=\d)[\s-]+(?=\d)")
+_STD_SEP = re.compile(r"[\s-]+")
+
+
+def std_key(standard_id: str | None) -> str:
+    """Spelling-independent key of a standard number: 'MIL-HDBK-5' = 'MIL HDBK 5', 'AMS 4911' = 'AMS4911'.
+    A separator between two digits is kept ('ISO 2768-1' never equals 'ISO 27681')."""
+    if not standard_id:
+        return ""
+    s = _STD_DIGIT_SEP.sub("/", standard_id.strip().upper())     # '/' is kept by _STD_SEP
+    return _STD_SEP.sub("", s)
+
+
+def same_standard(query_id: str | None, doc_id: str | None) -> bool:
+    """True when a document's standard number is the one a query names (audit F4: a substring test gave
+    ASTM E83 the ASTM E8 boost). Revisions are compared nowhere here: detect_standard keeps them apart."""
+    return bool(query_id and doc_id) and std_key(query_id) == std_key(doc_id)
+
+
+def cited_standards(texts, max_chars: int = 2_000_000) -> dict[str, tuple[str, int]]:
+    """Every standard number printed in the texts: {std_key: (first spelling, count)} (Phase 4.4)."""
+    out: dict[str, tuple[str, int]] = {}
+    seen = 0
+    for t in texts:
+        if not t:
+            continue
+        t = t[: max(0, max_chars - seen)]
+        seen += len(t)
+        for pat in STD_PATTERNS:
+            for m in pat.finditer(t):
+                sid = m.group(1).strip()
+                k = std_key(sid)
+                if k:
+                    first, n = out.get(k, (sid, 0))
+                    out[k] = (first, n + 1)
+        if seen >= max_chars:
+            break
+    return out
+
+
 YEAR_RE = re.compile(r"\b(19[5-9]\d|20[0-3]\d)\b")
 
 

@@ -105,17 +105,55 @@ def last_run(cfg: Config) -> dict | None:
             "min_questions": MIN_GOLDEN}
 
 
+def _loc_match(locators: list[str], want: list[str]) -> bool:
+    """A hit's cited locators name an expected one (store.at_locator's word-boundary rule)."""
+    from .store import at_locator
+    rows: Any = [{"locator": loc} for loc in locators]
+    return any(at_locator(rows, w) for w in want if w)
+
+
+def _value_at(con, hit, locators: list[str], value: str) -> bool:
+    """Citation validity (S14): the expected value is printed in the chunks at the hit's cited locators,
+    not merely somewhere in the document."""
+    from .store import at_locator
+    from .verify import numbers
+    rows = con.execute("SELECT locator, text FROM chunks WHERE doc_id=?", (hit.doc_id,)).fetchall()
+    sel = [r for loc in locators for r in at_locator(rows, loc)]
+    want = [n[0] for n in numbers(value)]
+    for r in sel:
+        text = r["text"] or ""
+        if not want:
+            if value.lower() in text.lower():
+                return True
+            continue
+        got = [n[0] for n in numbers(text)]
+        if all(any(abs(g - w) <= 1e-9 * max(1.0, abs(w)) for g in got) for w in want):
+            return True
+    return False
+
+
 def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool | None = None,
-             reranker: str | None = None, record: bool = True, memory: bool = False) -> dict:
-    items = yaml.safe_load(golden.read_text(encoding="utf-8")) or []
+             reranker: str | None = None, record: bool = True, memory: bool = False,
+             intent: str | None = None) -> dict:
+    """`intent`: a ranking profile for every query; 'item' uses each item's own `intent` (property, research,
+    locate). Items with `status: unreviewed` (candidates from `erla memory golden`) are skipped."""
+    raw = yaml.safe_load(golden.read_text(encoding="utf-8")) or []
+    items = [it for it in raw if str(it.get("status") or "") != "unreviewed"]
     rows, r5, r10, mrr, nd, p1, vals, vtot = [], 0, 0, 0.0, 0.0, 0, 0, 0
+    lhit, ltot, cval, ctot = 0, 0, 0, 0
     secs = 0.0
     mode = ""
+    by_class: dict[str, list[float]] = {}
+    calib: dict[str, dict[str, int]] = {}
     for it in items:
+        it_intent = it.get("intent") if intent == "item" else intent
         t0 = time.perf_counter()
-        hits, _exp, mode = search(con, it["query"], k=SEARCH_K, cfg=cfg, hybrid=hybrid, rerank=rerank,
-                                  reranker=reranker, memory=memory)
+        kw: dict[str, Any] = {"cfg": cfg, "hybrid": hybrid, "rerank": rerank, "reranker": reranker, "memory": memory}
+        if it_intent:
+            kw["intent"] = it_intent
+        hits, _exp, mode = search(con, it["query"], k=SEARCH_K, **kw)
         secs += time.perf_counter() - t0
+        all_hits = hits
         hits = hits[:10]                  # scored @10; searched as ERLA searches (k changes the AND/OR candidate pool)
         groups = _groups(it)
         relevant = [s for _, subs in groups for s in subs]
@@ -125,6 +163,8 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
         mrr += (1 / rank) if rank else 0
         q_ndcg = ndcg(hits, groups)
         nd += q_ndcg
+        cls = str(it.get("class") or it.get("intent") or "unclassified")
+        by_class.setdefault(cls, []).append(q_ndcg)
         top_is_primary = bool(hits) and bool(groups) and _match(hits[0], groups[0][1])
         p1 += int(top_is_primary)
         vhit = None
@@ -132,13 +172,46 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
             vtot += 1
             vhit = _value_in(con, [h for h in hits[:5] if _match(h, relevant)], str(it["expect_value"]))
             vals += int(bool(vhit))
+        want_loc = [str(x) for x in (it.get("expect_locator") or [])]
+        if isinstance(it.get("expect_locator"), str):
+            want_loc = [str(it["expect_locator"])]
+        loc_ok = None
+        if want_loc:
+            ltot += 1
+            loc_ok = any(_match(h, relevant) and _loc_match(h.locators, want_loc) for h in hits[:5])
+            lhit += int(loc_ok)
+        cite_ok = None
+        if it.get("expect_value") not in (None, "") and con is not None:
+            first = next((h for h in hits[:5] if _match(h, relevant)), None)
+            if first is not None:
+                ctot += 1
+                cite_ok = _value_at(con, first, first.locators, str(it["expect_value"]))
+                cval += int(cite_ok)
+        verdict = None
+        if con is not None and hasattr(con, "execute"):
+            try:
+                from .search import evidence
+                verdict = evidence(con, it["query"], all_hits, mode, cfg)["verdict"]
+            except Exception:
+                verdict = None
+            if verdict:
+                c = calib.setdefault(verdict, {"n": 0, "right_in_top5": 0})
+                c["n"] += 1
+                c["right_in_top5"] += int(rank is not None and rank <= 5)
         rows.append({"id": it.get("id"), "query": it["query"], "rank": rank, "ndcg@10": round(q_ndcg, 3),
-                     "primary@1": top_is_primary, "value_found": vhit, "top": [h.title[:60] for h in hits[:3]]})
+                     "primary@1": top_is_primary, "value_found": vhit, "locator_hit@5": loc_ok,
+                     "citation_valid": cite_ok, "evidence": verdict, "class": cls,
+                     "top": [h.title[:60] for h in hits[:3]]})
     n = max(len(items), 1)
     result = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "n": len(items),
               "recall@5": round(r5 / n, 3), "recall@10": round(r10 / n, 3), "mrr": round(mrr / n, 3),
               "ndcg@10": round(nd / n, 3), "primary@1": round(p1 / n, 3),
-              "value_match": f"{vals}/{vtot}", "sec_per_query": round(secs / n, 2), "hybrid": hybrid,
+              "value_match": f"{vals}/{vtot}",
+              "locator_hit@5": round(lhit / ltot, 3) if ltot else None, "locator_items": ltot,
+              "citation_valid": f"{cval}/{ctot}",
+              "ndcg@10_by_class": {k: round(sum(v) / len(v), 3) for k, v in sorted(by_class.items())},
+              "evidence_calibration": calib, "skipped_unreviewed": len(raw) - len(items),
+              "intent": intent, "sec_per_query": round(secs / n, 2), "hybrid": hybrid,
               "mode": mode, "reranker": reranker or (cfg.rerank or {}).get("model"), "golden": str(golden),
               "rows": rows}
     if not record:

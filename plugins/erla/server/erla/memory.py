@@ -104,6 +104,76 @@ def load(cfg) -> list[dict[str, Any]]:
     return list(_CACHE["entries"])
 
 
+def _questions(cfg) -> dict[str, str]:
+    """verification_id -> the question the agent logged with it (log_request records, rules R7.1)."""
+    p = Path(cfg.log_dir) / "retrieval_log.jsonl"
+    out: dict[str, str] = {}
+    if not p.is_file():
+        return out
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get("verification_id") and r.get("query"):
+            out[str(r["verification_id"])] = str(r["query"])
+    return out
+
+
+def golden_candidates(cfg, con) -> list[dict[str, Any]]:
+    """Phase 5.2: golden-query candidates from verified answers. Each live memory entry names the document
+    (by content hash) and the locator a PASSed value or quote came from; the question is the one logged with
+    the same verification_id (else the entry's topic terms). One item per question, every source it was
+    verified at as `primary` with its `expect_locator`. All items are `status: unreviewed`: the user grades
+    them before they count (S14), since a verified source is not proof it is the best source."""
+    entries = load(cfg)
+    if not entries:
+        return []
+    asked = _questions(cfg)
+    docs: dict[str, dict[str, Any]] = {}
+    for r in con.execute("SELECT doc_id, sha256, rel_path, title, classification_flag FROM documents "
+                         "WHERE sha256 IS NOT NULL AND doc_id NOT IN (SELECT doc_id FROM duplicates)"):
+        docs.setdefault(r[1], {"doc_id": r[0], "rel_path": r[2], "title": r[3], "flag": r[4]})
+    items: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        d = docs.get(e["sha256"])
+        if d is None:
+            continue
+        q = asked.get(str(e.get("evidence")), " ".join(e["topic"]))
+        it = items.setdefault(q, {"query": q, "primary": [], "expect_locator": [], "source": "source_memory",
+                                  "status": "unreviewed", "evidence": []})
+        ref = d["rel_path"] or d["title"]
+        if ref and ref not in it["primary"]:
+            it["primary"].append(ref)
+        if e["locator"] not in it["expect_locator"]:
+            it["expect_locator"].append(e["locator"])
+        if e.get("evidence") and e["evidence"] not in it["evidence"]:
+            it["evidence"].append(e["evidence"])
+        if d["flag"]:
+            it["flag"] = d["flag"]
+    out = list(items.values())
+    for i, it in enumerate(out, 1):
+        it["id"] = f"M{i:03d}"
+    return out
+
+
+def export_golden(cfg, con) -> tuple[Path | None, int]:
+    """Write golden_candidates to out/golden_from_memory_<date-time>.yaml (G1.2: out/ only)."""
+    import yaml
+
+    from . import safeio
+    items = golden_candidates(cfg, con)
+    if not items:
+        return None, 0
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    path = Path(cfg.out_dir) / f"golden_from_memory_{stamp}.yaml"
+    head = ("# Golden-query CANDIDATES from ERLA's source memory (verified answers). Review each item: keep it only\n"
+            "# if `primary` is the best source for the question, add `expect_docs` / `related`, then set\n"
+            "# status: reviewed. Items with a `flag` name restricted documents: keep this file local (G2).\n")
+    safeio.write_text_at(safeio.check(cfg, path), head + yaml.safe_dump(items, sort_keys=False, allow_unicode=True))
+    return path, len(items)
+
+
 def prior(cfg, con, query: str, doc_ids: list[int]) -> dict[int, dict[str, Any]]:
     """Score factor and evidence for each candidate document the memory knows on this query's topic."""
     entries = load(cfg) if cfg is not None else []

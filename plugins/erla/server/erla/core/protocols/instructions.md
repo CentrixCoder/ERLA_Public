@@ -37,7 +37,7 @@ Follow these steps for every request. Skip a step only when the step's own skip 
 ## Step 3 — Local Pass
 
 1. Verify index freshness with `erla stats` (age + library change probe; rule in ERLA.md, P1). If `index state: STALE` -> run `erla refresh` (incremental index -> deferred OCR -> embeddings) and record the new/updated/removed/OCR counts in the packet header. If a refresh/OCR job is already running, search the current index and list what is not yet searchable under section E. Never treat an unknown index date as current.
-2. Run `erla search` for each query in the set; merge, dedupe by doc_id, keep max score.
+2. Run one search with the base query and the rest of the query set as sub-queries (`library_search` `queries`; CLI `erla search "<base>" --also "<variant>" ...`), with the request's intent (`--intent property|research|locate`). The server fuses them by rank and re-ranks against the base query; do not merge separate searches by score (scores from different searches are not comparable).
 3. For the top N (default 10) hits: `erla show <doc_id> --locator <loc>` and read the surrounding chunk(s).
 3a. Material allowables: also run `erla props <quantity> [--material ...] [--basis ...]`. Property rows are pointers, not sources: `erla show` the row's locator and confirm value, units and column conditions for every value used (R3.3); report the `!!` quality lines.
 4. Mark each hit: RELEVANT / PARTIAL / NOT RELEVANT, with one-line reason.
@@ -120,8 +120,9 @@ Run after every ERLA release, when Step 0.4 finds drift, or when the user asks.
 
 ### W9. Independent check (Professor; skill S19)
 1. Decide: `site_info` → `check_policy` (`auto`: the packet reports a COMPUTED value, applies a discipline skill, or gives a design value, margin or allowable; `always`; `off`). A user request (`/erla:check`) runs it under any policy.
-2. Open the check: `check_open` with {question, inputs (locator or USER INPUT), sources, method (one line), discipline, quantities [{name, value, units, calc_id, source}], assumptions, conclusion}. It returns `check_id` and `brief_part1`, which holds none of your values.
+2. Open the check: `check_open` with {question, inputs (locator or USER INPUT), sources, method (one line), discipline, quantities [{name, value, units, calc_id, source}], assumptions, conclusion}. It returns `check_id` and `brief_part1`, which holds none of your values. State whether each reaction or load is signed (with its sign convention) or a magnitude: a sign mismatch reads as a contradiction (k-d6d6d23e7284).
 3. Send `check_id` and `brief_part1` to the `professor` agent (Agent tool, `erla:professor`). It re-opens the sources, records its own estimate of every quantity (`check_estimate`), then sees your values with the comparison computed by code (`check_reveal`), runs sanity checks and the S0 checklist, and records the verdict and findings (`check_close`); code refuses a verdict that contradicts the comparison.
+3a. Coverage audit. For a margin, a design value or a program, `check_open` also takes the coverage inventory (R4.7: rows {configuration, mode, status, source, reason}) and `reports_margins: true`. The Professor reviews it against the discipline's failure-mode catalogue and the cited sources before the values: a credible mode missing from it, or excluded without a source or the user's decision, is a finding (changes the answer when it could govern). A check whose brief has no inventory reports "Coverage audited: no", and its verdict is at most PASS WITH FINDINGS (G6.3); `check_close` refuses a PASS without `coverage_audited`.
 4. Read the result with `check_status`, and act on the verdict:
    - FAIL: fix and open a new check, at most 2 rework rounds; otherwise report each unresolved finding in §G and §E.
    - PASS WITH FINDINGS: address or report each finding.

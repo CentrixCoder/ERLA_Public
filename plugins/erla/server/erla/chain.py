@@ -45,14 +45,22 @@ def run_chain(cfg: Config, *, full: bool = False, ocr_inline: bool = False, run_
 
     # A3: a new property parser rebuilds every document's records from the stored table text
     # (index only, no library file is read; seconds for a large library)
-    from . import props
+    from . import props, refs
     con = store.connect_writer(cfg)
     try:
         rebuilt = props.rebuild_if_stale(con, log=log)
+        # 0.7.0: full-text index version 2 (punctuation, compounds, path column) and the citation graph,
+        # both rebuilt from stored chunks (index only, no library file is read)
+        fts_upgraded = store.fts_upgrade_if_stale(con, log=log)
+        refs_rebuilt = refs.rebuild_if_stale(con, log=log, cfg=cfg)
     finally:
         con.close()
     if rebuilt:
         summary["properties_rebuilt"] = rebuilt
+    if fts_upgraded:
+        summary["fts_upgraded_chunks"] = fts_upgraded
+    if refs_rebuilt:
+        summary["refs_rebuilt_documents"] = refs_rebuilt
 
     budget = float((cfg.tables or {}).get("refresh_budget_minutes", 60))
     if run_tables and (cfg.tables or {}).get("enabled", True) and budget > 0:
@@ -73,6 +81,16 @@ def run_chain(cfg: Config, *, full: bool = False, ocr_inline: bool = False, run_
             summary["pruned_duplicate_embeddings"] = prune_duplicate_embeddings(con)
             summary["embedded_chunks"] = embed_pending(con, cfg, limit=None, log=log, progress=heartbeat)
             summary["vector_index"] = export_matrix(con, cfg, progress=heartbeat)
+        finally:
+            con.close()
+    from . import sparse
+    if run_embed and sparse.enabled(cfg):            # 0.7.0 opt-in learned sparse channel (Phase 2.4)
+        phase("sparse")
+        con = store.connect_writer(cfg)
+        try:
+            summary["pruned_sparse"] = sparse.prune(con)
+            summary["sparse_chunks"] = sparse.embed_pending(con, cfg, log=log, progress=heartbeat)
+            summary["sparse_rows"] = sparse.mark_built(con)
         finally:
             con.close()
     return summary

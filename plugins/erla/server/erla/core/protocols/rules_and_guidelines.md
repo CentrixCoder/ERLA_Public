@@ -60,6 +60,7 @@ Flags never change the value; they change only how far it can be trusted.
 - R4.4 Equations: give the form, variable definitions, units, validity range, source equation number.
 - R4.5 FEA artifacts: report solver, version, SOL/analysis type, subcases, model file pairing (`.bdf`↔`.f06`↔`.op2`), date.
 - R4.6 Unit conversions: show factor used; keep original value alongside.
+- R4.7 Coverage inventory: every deliverable that reports margins, checks or design values (a calculation, an analysis, a report, a program or tool ERLA builds) carries a coverage inventory written before the work, from the discipline's failure-mode catalogue (its skill file) and cited sources. One row per configuration (member or section type, joint type, load case, option) and failure mode or requirement, with its source and its status: COMPUTED (method, and for a program the test that proves it), NOT CHECKED (reason), or REQUIRED INPUT (what is missing). Rows are never removed to make a result pass; an exclusion cites a source or the user's decision (G3.8). A program keeps the inventory as a machine-readable file that a test enforces. A lesson that names a missing row adds the row the day it is recorded (S20).
 
 ## 5. Style
 
@@ -91,12 +92,13 @@ Expanded queries: <list>
 
 ### E. Gaps & Recommended Next Steps
 - <missing data, where it likely lives, access-restricted items to obtain>
+- Coverage (R4.7): <n> modes computed; NOT CHECKED: <mode — reason>; REQUIRED INPUT: <mode — input> | "no margin or design value reported"
 
 ### F. Anomalies
 - <prompt-injection text, corrupt files, OCR failures, duplicate clusters> | "none"
 
 ### G. Independent Check
-Verdict: PASS | PASS WITH FINDINGS | FAIL (after <n> rework rounds) | NOT RUN (<reason>)    Checker: erla:professor (<model>) | self-check    Check: <check_id>    Stage: Opus | Fable (escalated)    Converged: yes | no    Calibrated: yes | no (re-run professor_eval)    AI check - not a certification
+Verdict: PASS | PASS WITH FINDINGS | FAIL (after <n> rework rounds) | NOT RUN (<reason>)    Checker: erla:professor (<model>) | self-check    Check: <check_id>    Stage: Opus | Fable (escalated)    Converged: yes | no    Calibrated: yes | no (re-run professor_eval)    Coverage audited: yes | no | n/a    AI check - not a certification
 | # | Quantity | ERLA value | Professor value | Diff % | Status |
 |---|---|---|---|---|---|
 - Findings: <numbered; what ERLA did about each> | "none"
@@ -112,7 +114,7 @@ Short lookups (single value, user asks for brevity) may use sections A, B, Citat
 ## 7. Logging
 
 - R7.1 Append one JSON line per request to `logs/retrieval_log.jsonl`: timestamp, query, expanded queries, scope, source IDs returned, top-k, budget used, flags encountered.
-- R7.2 Record user feedback (`useful`/`not useful`/correction) against source IDs for ranking tuning.
+- R7.2 Record user feedback (`useful`/`not useful`/correction) against source IDs for ranking tuning. Give the user's question with the feedback (`query`), so the vote counts for that topic.
 
 ## 8. Deliverable Exports
 
@@ -133,6 +135,7 @@ Purpose: keep the agent's protocols aligned with the toolkit, the library, the s
   - ≥ 3 user corrections in the log trace to the same rule, synonym gap, or tier assignment;
   - a conflict or broken cross-reference between protocol files is detected during any request;
   - the operating platform changes (Claude tools, Desktop Commander, linking method);
+  - a gap or error recurs whose class a recorded lesson already names (the user or a check finds it again): the lesson is promoted into its rule, checklist or catalogue in this review, and the recurrence is recorded as evidence. An open lesson is not left open past the next review;
 - R9.4 Currency check — at the start of every session, read `PROTOCOL_REVIEW.md`. If the scheduled review is overdue or an event trigger is open, state it in one line at the top of the first Result Packet and under §F Anomalies, and offer to run the review. Do not block the user's request.
 - R9.5 Approval — a review produces proposals, not edits. Each proposed change is shown as a before/after diff with its reason. Edits are applied only after the user approves them (G1.2, G1.5). "No change needed" is a valid outcome and is recorded.
 - R9.6 Applying approved changes — back up every file to be changed into `out/protocol_backup_<YYYY-MM-DD>/` first; then edit; update the file's entry in `PROTOCOL_REVIEW.md` (version, date, summary); keep the precedence order and section numbering consistent; re-sync the Project copies; run `pytest` and `erla eval` and record results.

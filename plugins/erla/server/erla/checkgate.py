@@ -43,6 +43,11 @@ CAL_MIN_FAULTY, CAL_MIN_CONTROLS = 10, 5
 CALIBRATION_LOG = "professor_calibration.jsonl"
 NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 ID = re.compile(r"^k-[0-9a-f]{12}$")
+# Coverage (rules R4.7, guardrails G3.8 and G6.3, instructions W9 step 3a; owner 2026-10-24): a check of a margin, a
+# design value or a program audits the draft's coverage inventory, one row per configuration and failure mode. A PASS
+# on values is not a PASS on completeness, so without an audited inventory such a check is at most PASS WITH FINDINGS.
+COVERAGE_STATUS = ("COMPUTED", "NOT CHECKED", "REQUIRED INPUT")
+MARGIN = re.compile(r"(?:\bMS\b|\bmargin)", re.IGNORECASE)
 
 
 class CheckError(ValueError):
@@ -111,6 +116,7 @@ def open_check(cfg: Config, packet_in: Any, rework_of: str = "", escalate_from: 
         names.append(str(q["name"]).strip())
     if len(set(names)) != len(names):
         raise CheckError("quantity names must be unique")
+    _coverage_rows(packet)
     stage, rnd, prior = _chain(cfg, rework_of, escalate_from)
     body = json.dumps(packet, sort_keys=True, ensure_ascii=False, default=str)
     cid = "k-" + hashlib.sha256(f"{body}|{_now()}".encode()).hexdigest()[:12]
@@ -147,11 +153,51 @@ def _chain(cfg: Config, rework_of: str, escalate_from: str) -> tuple[str, int, s
     return "opus", 1, ""
 
 
+def _coverage_rows(packet: dict[str, Any]) -> list[dict[str, Any]]:
+    """The draft's coverage inventory, checked: rows {configuration, mode, status, source, reason}; a COMPUTED row
+    names its source or method, the others their reason or missing input. [] when the draft has none."""
+    raw = packet.get("coverage")
+    if raw is None:
+        return []
+    rows_in = _list(raw)
+    if rows_in is None:
+        raise CheckError("coverage must be a list of rows {configuration, mode, status, source, reason}")
+    rows: list[dict[str, Any]] = []
+    for i, r_in in enumerate(rows_in):
+        r = _obj(r_in)
+        if r is None or not str(r.get("configuration") or "").strip() or not str(r.get("mode") or "").strip():
+            raise CheckError(f"coverage row {i}: configuration and mode are required")
+        st = str(r.get("status") or "").strip().upper()
+        if st not in COVERAGE_STATUS:
+            raise CheckError(f"coverage row {i}: status must be one of {list(COVERAGE_STATUS)}")
+        if st == "COMPUTED" and not str(r.get("source") or "").strip():
+            raise CheckError(f"coverage row {i}: a COMPUTED mode names its source or method")
+        if st != "COMPUTED" and not str(r.get("reason") or "").strip():
+            raise CheckError(f"coverage row {i}: a {st} mode gives its reason or the missing input")
+        rows.append({**r, "status": st})
+    return rows
+
+
+def needs_coverage(packet: dict[str, Any]) -> bool:
+    """Does this check report a margin, a design value or a program (W9 step 3a)? Declared by the lead
+    (``reports_margins``) or seen in a quantity's name (MS, margin), so leaving the flag out does not avoid it."""
+    if packet.get("reports_margins") is True or packet.get("program") is True:
+        return True
+    names = [str(q.get("name") or "") for q in (_obj(x) for x in _list(packet.get("quantities")) or []) if q is not None]
+    return any(MARGIN.search(n) for n in names)
+
+
 def brief_part1(packet: dict[str, Any]) -> dict[str, Any]:
-    """Part 1 of the Check Brief: everything the checker needs to estimate, none of the lead's results."""
+    """Part 1 of the Check Brief: everything the checker needs to estimate, none of the lead's results. The
+    coverage inventory is a list of what the draft covers, not a result, so the checker sees it first (W9 3a)."""
     keep = ("question", "inputs", "sources", "method", "discipline")
     out = {k: packet[k] for k in keep if k in packet}
     out["quantities"] = [{"name": q["name"], "units": q["units"]} for q in packet["quantities"]]
+    rows = _coverage_rows(packet)
+    if rows:
+        out["coverage"] = rows
+    elif needs_coverage(packet):
+        out["coverage"] = "NONE GIVEN: audit not possible; the verdict is at most PASS WITH FINDINGS (guardrails G6.3)"
     return out
 
 
@@ -235,10 +281,12 @@ def reveal(cfg: Config, check_id: str) -> dict[str, Any]:
 
 def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
           checker: str = "erla:professor", notes: Any = None, model: str = "",
-          model_id: str = "") -> dict[str, Any]:
+          model_id: str = "", coverage_audited: bool = False) -> dict[str, Any]:
     """Record the verdict; refuse one that the computed comparison contradicts. ``notes`` are minor remarks
     that change nothing (a reason for a 2-5 % difference, a presentation point); they never make a PASS
-    impossible, so PASS keeps its meaning (2026-10-17 calibration: no control got a clean PASS)."""
+    impossible, so PASS keeps its meaning (2026-10-17 calibration: no control got a clean PASS).
+    ``coverage_audited``: the checker compared the draft's coverage inventory with the discipline's failure-mode
+    catalogue (W9 step 3a). A check of a margin, design value or program without that audit is refused a PASS."""
     rec = load(cfg, check_id)
     if rec["state"] != "revealed":
         raise CheckError(f"check {check_id} is {rec['state']}: close it after check_reveal")
@@ -278,6 +326,13 @@ def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
     if verdict == "PASS" and (fs or any(c["status"] not in ("agrees", "explain") for c in cmp_)):
         raise CheckError("PASS needs every quantity checked and within tolerance and no findings (minor remarks "
                          "go in notes); use PASS WITH FINDINGS or FAIL")
+    needs_cov = needs_coverage(rec["packet"])
+    audited = bool(coverage_audited) and bool(_coverage_rows(rec["packet"]))
+    if verdict == "PASS" and needs_cov and not audited:
+        raise CheckError("this check reports a margin, design value or program and its coverage inventory was not "
+                         "audited (none given, or coverage_audited not set): a PASS on values is not a PASS on "
+                         "completeness (guardrails G6.3). Use PASS WITH FINDINGS with a finding 'coverage not "
+                         "audited', or audit the inventory (W9 step 3a)")
     if verdict == "PASS WITH FINDINGS" and (not fs or changes):
         raise CheckError("PASS WITH FINDINGS needs at least one finding and none that changes the answer "
                          "(that is a FAIL)")
@@ -287,7 +342,7 @@ def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
     calibrated = None if checker != "erla:professor" else mid in calibrated_models(cfg)
     rec.update(state="closed", closed=_now(), verdict=verdict, findings=fs, notes=ns, checker=checker,
                model=str(model).strip().lower() or None, model_id=mid or None, calibrated=calibrated,
-               converged=converged)
+               converged=converged, coverage_audited=audited if needs_cov else None)
     _save(cfg, rec)
     from .report import append_log
     if calibrated is False:
@@ -296,9 +351,10 @@ def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
                      "stage": stage, "round": rec.get("round", 1), "converged": converged,
                      "model_id": mid or None, "calibrated": calibrated,
                      "n_quantities": len(cmp_), "n_out": sum(c["status"] in OUT for c in cmp_),
-                     "n_not_checked": sum(c["status"] == "not checked" for c in cmp_), "n_findings": len(fs)})
+                     "n_not_checked": sum(c["status"] == "not checked" for c in cmp_), "n_findings": len(fs),
+                     "coverage_audited": rec["coverage_audited"]})
     return {"check_id": check_id, "state": "closed", "verdict": verdict, "checker": checker, "stage": stage,
-            "model_id": mid or None, "calibrated": calibrated,
+            "model_id": mid or None, "calibrated": calibrated, "coverage_audited": rec["coverage_audited"],
             **({"calibration_note": f"checker model {mid} not yet calibrated: re-run scripts/professor_eval.py"}
                if calibrated is False else {}),
             "converged": converged, "comparison": cmp_, "findings": fs, "notes": ns,
@@ -369,7 +425,8 @@ def status(cfg: Config, check_id: str) -> dict[str, Any]:
     if rec["state"] == "closed":
         out.update(verdict=rec["verdict"], checker=rec["checker"], comparison=rec["comparison"],
                    findings=rec["findings"], notes=rec.get("notes", []), converged=rec.get("converged", True),
-                   model_id=rec.get("model_id"), calibrated=rec.get("calibrated"))
+                   model_id=rec.get("model_id"), calibrated=rec.get("calibrated"),
+                   coverage_audited=rec.get("coverage_audited"))
         if not out["converged"]:
             out["next"] = _next_step(rec)
     return out

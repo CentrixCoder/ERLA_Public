@@ -394,8 +394,8 @@ def cmd_search(a) -> int:
         types=[t.strip().lower().lstrip(".") for t in a.type.split(",")] if a.type else None,
         tiers=[t.strip().upper() for t in a.tier.split(",")] if a.tier else None,
         year_min=a.year_min, discipline=a.discipline, exclude_flagged=a.exclude_flagged,
-        boosts=report.feedback_boosts(cfg), cfg=cfg, hybrid=not a.no_vector,
-        rerank=False if a.no_rerank else None, reranker=a.reranker)
+        boosts=report.feedback_boosts(cfg, con, a.query), cfg=cfg, hybrid=not a.no_vector,
+        rerank=False if a.no_rerank else None, reranker=a.reranker, intent=a.intent, queries=a.also or None)
     idx_date = store.get_meta(con, "last_index_at")
     hd = [h.as_dict() for h in hits]
     payload = {"query": a.query, "index_date": idx_date, "mode": mode, "expanded": exp.describe(), "hits": hd}
@@ -649,7 +649,7 @@ def cmd_eval(a) -> int:
     if not golden.is_file():
         golden = core_dir() / "eval" / "golden_queries.yaml"
     res = run_eval(con, cfg, golden, hybrid=not a.no_vector, rerank=False if a.no_rerank else None,
-                   reranker=a.reranker, memory=a.memory)
+                   reranker=a.reranker, memory=a.memory, intent=a.intent)
     _out(json.dumps(res, indent=2, default=str))
     return 0
 
@@ -664,8 +664,19 @@ def cmd_memory(a) -> int:
             sys.exit(f"no source-memory entry {a.entry}")
         _out(f"forgotten: {a.entry}")
         return 0
+    if a.action == "golden":
+        path, n = memory.export_golden(cfg, _con(cfg))
+        _out(f"{n} golden candidates (status: unreviewed) -> {path}" if n else "no verified answers to export yet")
+        return 0
     for e in memory.load(cfg):
         _out(f"{e['id']}  doc {e['doc_id']} {e['locator']}  [{' '.join(e['topic'])}]  {e['evidence']}  {e['ts']}")
+    return 0
+
+
+def cmd_refs(a) -> int:
+    from . import refs
+    cfg = _cfg()
+    _out(json.dumps(refs.library_refs(_con(cfg), a.standard, k=a.k, cfg=cfg), indent=2, default=str))
     return 0
 
 
@@ -680,6 +691,10 @@ def cmd_embed(a) -> int:
     m = export_matrix(con, cfg)
     _out(f"pruned {p} duplicate-document vectors; embedded {n} new chunks; "
          f"vector index rows: {m} ({vector_backend(cfg)})")
+    from . import sparse
+    if sparse.enabled(cfg):
+        sp = sparse.embed_pending(con, cfg, limit=a.limit, log=_out)
+        _out(f"sparse: encoded {sp} chunks; {sparse.mark_built(con)} sparse vectors (model {sparse.model_name(cfg)})")
     return 0
 
 
@@ -718,8 +733,10 @@ def cmd_lesson(a) -> int:
 
 
 def cmd_feedback(a) -> int:
-    from .report import append_log
-    _out(str(append_log(_cfg(), {"doc_id": a.doc_id, "verdict": a.verdict, "note": a.note}, "feedback.jsonl")))
+    from .report import append_log, feedback_record
+    cfg = _cfg()
+    rec = feedback_record(_con(cfg, must_exist=False), a.doc_id, a.verdict, a.note, a.query or "")
+    _out(str(append_log(cfg, rec, "feedback.jsonl")))
     return 0
 
 
@@ -830,6 +847,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-vector", action="store_true", help="BM25 only (disable dense retrieval)")
     s.add_argument("--no-rerank", action="store_true", help="skip the cross-encoder re-ranker (A1)")
     s.add_argument("--reranker", help="ms-marco (default, CPU, fast), bge-v2-m3 (CPU, slower), qwen3-4b (GPU), custom")
+    s.add_argument("--intent", choices=["property", "research", "locate"], help="ranking profile (0.7.0)")
+    s.add_argument("--also", action="append", default=[], metavar="QUERY",
+                   help="a sub-query or variant fused with the main query (repeatable, 0.7.0)")
     s.set_defaults(fn=cmd_search)
 
     s = sub.add_parser("props", help="query extracted material properties (A3); cite the locator, not this table")
@@ -888,12 +908,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-rerank", action="store_true", help="measure without the cross-encoder (A1)")
     s.add_argument("--reranker", help="measure this re-ranker instead of the site's (see erla search --reranker)")
     s.add_argument("--memory", action="store_true", help="include the source memory (off: it would learn the answers)")
+    s.add_argument("--intent", choices=["property", "research", "locate", "item"], default=None,
+                   help="ranking profile for every query; 'item' uses each golden item's own intent (0.7.0)")
     s.set_defaults(fn=cmd_eval)
 
     s = sub.add_parser("memory", help="source memory: list what verified answers taught the ranking, or forget one")
-    s.add_argument("action", choices=["list", "forget"])
+    s.add_argument("action", choices=["list", "forget", "golden"],
+                   help="golden: write unreviewed golden candidates from verified answers to out/ (0.7.0)")
     s.add_argument("entry", nargs="?", help="entry id to forget")
     s.set_defaults(fn=cmd_memory)
+
+    s = sub.add_parser("refs", help="library editions of a standard and the documents that cite it (0.7.0)")
+    s.add_argument("standard")
+    s.add_argument("--k", type=int, default=50)
+    s.set_defaults(fn=cmd_refs)
 
     s = sub.add_parser("webcheck", help="check a query is safe to send to the web (G2)")
     s.add_argument("query")
@@ -932,6 +960,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("doc_id", type=int)
     s.add_argument("verdict", choices=["useful", "not_useful"])
     s.add_argument("--note")
+    s.add_argument("--query", help="the question the verdict is about: the vote then counts for that topic only")
     s.set_defaults(fn=cmd_feedback)
     return p
 
