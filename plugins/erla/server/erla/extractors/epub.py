@@ -114,6 +114,9 @@ def _decode(data: bytes) -> tuple[str, str | None]:
 
 
 # ------------------------------------------------------------------ content
+_EXPONENT = re.compile(r"[-−–+]?\d{1,3}")    # as erla/extractors/word.py
+
+
 class _Table:
     """Rows of one HTML table; colspan and rowspan positions become blank cells (as merged PDF cells)."""
 
@@ -247,6 +250,7 @@ class _Content(HTMLParser):
         self.pre: list[str] | None = None
         self.table: _Table | None = None
         self.pending: list[str] = []      # page anchors met inside a table or code block
+        self.sups: list[tuple[list[str], int, bool]] = []    # open <sup>: its text list, start, holds a link
 
     def _flush(self, keep_kind: bool = False) -> None:
         raw = "".join(self.buf).translate(INVISIBLE)
@@ -270,11 +274,46 @@ class _Content(HTMLParser):
             self.events.append(("page", ident))
         self.pending.clear()
 
+    def _text_list(self) -> list[str] | None:
+        """The list the next text goes to (a table cell or caption, a code block, the paragraph)."""
+        if self.table is not None:
+            t = self.table
+            return t.cell if t.cell is not None else t.caption
+        return self.pre if self.pre is not None else self.buf
+
+    def _sup_start(self) -> None:
+        target = self._text_list()
+        if target is not None:
+            self.sups.append((target, len(target), False))
+
+    def _sup_end(self) -> None:
+        """A superscript after a number or a word is an exponent or a note mark, never more digits of the value
+        before it: '10<sup>6</sup>' -> '10^6', '83<sup><a>1</a></sup>' -> '83[1]' (the DOCX reader's rule;
+        correctness audit 2026-10-31: '80<sup>1</sup>' was stored as Ftu 801). An exponent needs a base: after
+        '[', ',' or other punctuation the superscript is a reference number and stays as written
+        ('Czaplicki [<sup>2</sup>]', release diff 2026-10-31)."""
+        target, start, link = self.sups.pop()
+        if start > len(target):
+            return                             # the paragraph was flushed inside the superscript
+        s = "".join(target[start:]).strip()
+        prev = "".join(target[:start])
+        if not s or not prev or prev[-1].isspace():
+            return
+        if link:
+            target[start:] = [f"[{s}]"]
+        elif (prev[-1].isalnum() or prev[-1] == ")") and _EXPONENT.fullmatch(s):
+            target[start:] = ["^" + s.replace("−", "-").replace("–", "-")]
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if self.skip:
             if tag == self.skip_tag:
                 self.skip += 1
             return
+        if tag == "sup":
+            self._sup_start()
+        elif tag == "a" and self.sups:
+            target, start, _link = self.sups[-1]
+            self.sups[-1] = (target, start, True)
         a = dict(attrs)
         if tag in SKIP or (tag == "nav" and NAV_SKIP & set(f"{a.get('epub:type') or ''} {a.get('role') or ''}".split())):
             self.skip, self.skip_tag = 1, tag      # a nav document in the spine: its page-list is not text
@@ -308,6 +347,8 @@ class _Content(HTMLParser):
             if tag == self.skip_tag:
                 self.skip -= 1
             return
+        if tag == "sup" and self.sups:
+            self._sup_end()
         if self.table is not None:
             if self.table.end(tag):
                 md = self.table.text()
@@ -539,6 +580,7 @@ class _Chunks:
 
 class EpubExtractor(Extractor):
     exts = ("epub",)
+    version = "epub-2"            # audit 2026-10-31: superscripts read as exponents or note marks
 
     def extract(self, path: Path) -> ExtractResult:
         try:

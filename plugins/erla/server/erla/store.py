@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import time
 from pathlib import Path
 
 SCHEMA_VERSION = 4
@@ -274,16 +275,28 @@ def fts_columns(version: int, text: str | None, title: str | None, path: str, re
     return (text or "", fts_title(title, path, rel_path))
 
 
+def fts_body(version: int, text: str | None) -> str:
+    """The 'text' column chunks_fts stores for one chunk: fts_columns(version, text, ...)[0]. Pure CPU, so the
+    indexer's worker processes compute it beside extraction (fts_insert(bodies=...))."""
+    return fts_text(text) if version >= 2 else (text or "")
+
+
 def fts_insert(con: sqlite3.Connection, rows: list[tuple[int, str | None]], title: str | None, path: str,
-               rel_path: str | None, version: int | None = None) -> None:
-    """Index (chunk_id, text) rows of one document in chunks_fts."""
+               rel_path: str | None, version: int | None = None, bodies: list[str] | None = None) -> None:
+    """Index (chunk_id, text) rows of one document in chunks_fts. `bodies`, when given, are the rows'
+    fts_body values computed in advance (same order); the title and path columns do not depend on the
+    chunk, so they are computed once per document."""
+    if not rows:
+        return
     v = version or fts_version(con)
-    if v >= 2:
-        con.executemany("INSERT INTO chunks_fts(rowid, text, title, path) VALUES (?,?,?,?)",
-                        [(cid, *fts_columns(v, t, title, path, rel_path)) for cid, t in rows])
-    else:
-        con.executemany("INSERT INTO chunks_fts(rowid, text, title) VALUES (?,?,?)",
-                        [(cid, *fts_columns(v, t, title, path, rel_path)) for cid, t in rows])
+    if bodies is None:
+        bodies = [fts_body(v, t) for _cid, t in rows]
+    elif len(bodies) != len(rows):
+        raise ValueError(f"fts_insert: {len(bodies)} bodies for {len(rows)} rows")
+    tail = fts_columns(v, "", title, path, rel_path)[1:]
+    sql = ("INSERT INTO chunks_fts(rowid, text, title, path) VALUES (?,?,?,?)" if v >= 2
+           else "INSERT INTO chunks_fts(rowid, text, title) VALUES (?,?,?)")
+    con.executemany(sql, [(cid, body, *tail) for (cid, _t), body in zip(rows, bodies)])
 
 
 def fts_delete(con: sqlite3.Connection, rows: list[tuple[int, str | None]], title: str | None, path: str,
@@ -306,6 +319,10 @@ def delete_document(con: sqlite3.Connection, doc_id: int) -> None:
     fts_delete(con, [(r["chunk_id"], r["text"]) for r in rows], d["title"] if d else "",
                d["path"] if d else "", d["rel_path"] if d else "")
     con.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
+    if rows and has_table(con, "meta"):
+        # SQLite gives freed chunk ids to the next chunks written, so an exported vector index made before this
+        # delete maps old vectors onto new text until it is rebuilt (embed.vector_mismatch reads this)
+        set_meta(con, "chunks_deleted_at", repr(time.time()))
     con.execute("DELETE FROM embeddings WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks)")
     if has_table(con, "sparse_vectors"):
         con.execute("DELETE FROM sparse_vectors WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks)")

@@ -233,7 +233,7 @@ def _check_context(item: dict[str, Any], res: dict[str, Any], confirmed: set[str
             f"{value} is printed at this locator, but its column is not confirmed ({why}): read the column "
             "heading on the page and report the value as NOT VERIFIED by code"))
         return
-    if where in ("record", "prose") or (where == "none" and not table_page):
+    if where == "record" or (where in ("none", "prose") and not table_page):
         return
     open_ = {f: v for f, v in claims.items() if f not in confirmed}
     if where == "row" and open_:
@@ -242,7 +242,7 @@ def _check_context(item: dict[str, Any], res: dict[str, Any], confirmed: set[str
             f"{', '.join(f'{k} {v}' for k, v in open_.items())} (a column heading?): read the column on the page "
             "and report the value as NOT VERIFIED by code"))
         return
-    if where != "none":
+    if where not in ("none", "prose"):
         return
     from .props import QUANTITY_PATTERNS, canonical_quantity
     quantity = str(item.get("quantity") or "")
@@ -250,14 +250,15 @@ def _check_context(item: dict[str, Any], res: dict[str, Any], confirmed: set[str
     if open_ or is_property:
         res.update(status="UNCONFIRMED", reason=(
             f"{value} is on the page, but in a table that was not extracted (no table rows or property records "
-            f"here), so code cannot tell which row and column it is printed in"
+            f"here hold it), so code cannot tell which row and column it is printed in"
             + (f" ({', '.join(f'{k} {v}' for k, v in open_.items())} not confirmed)" if open_ else "")
             + ": read the row and column on the page and report the value as NOT VERIFIED by code, or verify a "
             "sentence that states it as a quote"))
 
 
 # ------------------------------------------------------------------ table rows (0.2.20)
-TableRow = tuple[list[str], list[str], dict[str, int]]     # (labels, data cells, claim field -> label position)
+# (labels, data cells, claim field -> label position, column headings over the data cells or [] when unknown)
+TableRow = tuple[list[str], list[str], dict[str, int], list[str]]
 ROW_FIELDS = ("row", "quantity", "material", "temper", "form", "direction")   # quantity: transposed tables (Fty, Fcy rows)
 # a data cell: numbers, ranges and bounds, each optionally carrying a footnote letter ("80a", "62a 64a")
 NUMERIC_CELL = re.compile(r"^(?:[\s$≤≥<>~±+\-−–(]*\d[\d.,/:\-−–]*[a-z]{0,2}[)%*]*\s*)+$")
@@ -273,18 +274,20 @@ def _has(claim: str, text: str) -> bool:
     return bool(c) and f" {c} " in f" {_seq(text)} "
 
 
-def _table_rows(doc: _Doc, page: str) -> list[list[tuple[list[str], list[str]]]]:
-    """Data rows of each extracted table on the page, as (label cells, data cells). Label cells are the
-    current group heading (a row such as "Fcy, ksi:" with no numbers) plus the row's leading non-numeric
-    cells, an empty one inheriting the cell above (merged group labels)."""
-    tables: list[list[tuple[list[str], list[str]]]] = []
+def _table_rows(doc: _Doc, page: str) -> list[list[tuple[list[str], list[str], list[str]]]]:
+    """Data rows of each extracted table on the page, as (label cells, data cells, column headings). Label
+    cells are the current group heading (a row such as "Fcy, ksi:" with no numbers) plus the row's leading
+    non-numeric cells, an empty one inheriting the cell above (merged group labels). Column headings are the
+    last heading row's cells over the data cells, when that row has as many cells as the data row."""
+    tables: list[list[tuple[list[str], list[str], list[str]]]] = []
     for ch in doc.chunks:
         loc = str(ch["locator"]).lower()
         if not (loc == page or loc.startswith(page + " ")):
             continue
-        rows: list[tuple[list[str], list[str]]] = []
+        rows: list[tuple[list[str], list[str], list[str]]] = []
         above: list[str] = []
         group: list[str] = []
+        heads: list[str] = []
         for line in str(ch["text"] or "").splitlines():
             if line.count("|") < 2:
                 continue
@@ -292,12 +295,17 @@ def _table_rows(doc: _Doc, page: str) -> list[list[tuple[list[str], list[str]]]]
             first_num = next((i for i, c in enumerate(cells) if c and NUMERIC_CELL.match(c) and numbers(c)), None)
             if first_num is None:
                 filled = [c for c in cells if c]
+                if filled and all(re.fullmatch(r":?-{2,}:?", c) for c in filled):
+                    continue                                  # the markdown separator row
                 if 0 < len(filled) <= 2:                      # a group heading ("Fcy, ksi:") for the rows below
                     group, above = filled, []
-                continue                                      # a column-heading or text row: no data
+                else:
+                    heads = cells                             # a column-heading row
+                continue                                      # no data in a heading or text row
             label = [c or (above[i] if i < len(above) else "") for i, c in enumerate(cells[:first_num])]
             above = label
-            rows.append(([g for g in group if g not in label] + label, cells[first_num:]))
+            over = heads[first_num:] if len(heads) == len(cells) else []
+            rows.append(([g for g in group if g not in label] + label, cells[first_num:], over))
         if rows:
             tables.append(rows)
     return tables
@@ -345,36 +353,51 @@ def _check_row(doc: _Doc, locator: str, want: list[float], item: dict[str, Any],
     seen: set[str] = set()
     for rows in tables:
         scored: list[TableRow] = []
-        for lab, dat in rows:
+        for lab, dat, over in rows:
             pos = {f: p for f, c in claims.items() if (p := where(f, c, lab, dat)) is not None}
-            scored.append((lab, dat, pos))
+            scored.append((lab, dat, pos, over))
             seen |= set(pos)
-        held = {i for i, (_, dat, _) in enumerate(scored)
+        held = {i for i, (_, dat, _, _) in enumerate(scored)
                 if all(any(math.isclose(v, x, rel_tol=1e-9, abs_tol=1e-12) for c in dat for x, *_ in numbers(c))
                        for v in want)}
         found_in = [scored[i] for i in sorted(held)]
-        others = [p for i, (_, _, p) in enumerate(scored) if i not in held]
+        others = [p for i, (_, _, p, _) in enumerate(scored) if i not in held]
         hits += found_in
         candidates += [h for h in found_in if not any(contradicts(o, h[2], h[0]) for o in others)]
     if not hits:
         return "prose", set()                                 # the number is in prose, not in a table row
     for f in sorted(set(claims) - seen):
         res["warnings"].append(f"{f} '{claims[f]}' labels no table row here (a column heading?): confirm it on the page")
-    shown = "; ".join(" ".join(x for x in lab if x) or "(unlabelled row)" for lab, _, _ in hits[:5])
+    shown = "; ".join(" ".join(x for x in lab if x) or "(unlabelled row)" for lab, *_ in hits[:5])
     if not candidates:
         res.update(status="FAIL", reason=(f"{item.get('value')} is printed in the row(s) {shown}, not in the row for "
                                           f"{', '.join(f'{k} {v}' for k, v in claims.items())}: cite the right "
                                           "row's value or correct the claim"))
         return "row", set()
-    top = max(len(s) for _, _, s in candidates)
-    best = [(lab, dat, s) for lab, dat, s in candidates if len(s) == top]
-    labels = {tuple(x for x in lab if x) for lab, _, _ in best}
+    top = max(len(s) for _, _, s, _ in candidates)
+    best = [c for c in candidates if len(c[2]) == top]
+    labels = {tuple(x for x in lab if x) for lab, *_ in best}
     if len(labels) > 1:
         res.update(status="FAIL", reason=(f"{item.get('value')} appears in {len(labels)} rows here that the claim does "
                                           f"not tell apart ({'; '.join(' '.join(x) or '(unlabelled row)' for x in sorted(labels)[:5])}): "
                                           "name the row (quantity, material, temper, form, direction or row)"))
         return "row", set()
-    lab, dat, pos = best[0]
+    lab, dat, pos, over = best[0]
+    if "quantity" in claims and "quantity" not in pos and over:
+        # the quantity named by the value's column heading (correctness audit 2026-10-31: 65 under "Ftu, ksi"
+        # passed for a claimed Fty with only a warning)
+        from .props import parse_label
+        cols = [j for j, c in enumerate(dat) if j < len(over)
+                and any(math.isclose(v, x, rel_tol=1e-9, abs_tol=1e-12) for x, *_ in numbers(c) for v in want)]
+        named = {q for j in cols if (q := parse_label(over[j])[0])}
+        if named and claims["quantity"] not in named:
+            res.update(status="FAIL", reason=(
+                f"{item.get('value')} is in the column {', '.join(over[j] for j in cols)} ({', '.join(sorted(named))}), "
+                f"not {claims['quantity']}: cite the right column's value or correct the quantity"))
+            return "row", set()
+        if claims["quantity"] in named:
+            pos = {**pos, "quantity": -1}
+            res["warnings"] = [w for w in res["warnings"] if not w.startswith("quantity '")]
     res["row"] = " ".join(x for x in lab if x)
     res["evidence"] = " | ".join(lab + dat)[:240]
     return "row", set(pos)
@@ -470,9 +493,18 @@ def _check_conditions(con: sqlite3.Connection, doc: _Doc, locator: str, value: f
 
     def of_value(recs: list[Record]) -> list[Record]:
         recs = [r for r in recs if r["value"] is not None and math.isclose(r["value"], value, rel_tol=1e-9)]
-        return [r for r in recs if r["quantity"] == q] or recs if q else recs
+        return [r for r in recs if r["quantity"] == q] if q else recs
 
     rows = of_value([dict(r) for r in stored])
+    others = sorted({str(r["quantity"]) for r in stored if q and r["quantity"] and r["quantity"] != q
+                     and r["value"] is not None and math.isclose(r["value"], value, rel_tol=1e-9)})
+    if not rows and others:
+        # a record of another quantity holds this number: it never confirms the claim (correctness audit
+        # 2026-10-31: the Ftu record confirmed temper T6 for a reported Fty of the same value)
+        res.update(status="UNCONFIRMED", reason=(
+            f"{item.get('value')} at {locator} is recorded as {', '.join(others)}, not {q}: read the column heading "
+            "on the page and report the value as NOT VERIFIED by code, or correct the quantity"))
+        return set(), {}
     if not rows:
         res["warnings"].append(f"conditions ({', '.join(f'{k} {v}' for k, v in claims.items())}) not checked: "
                                "no property record for this value here - confirm the column heading on the page")

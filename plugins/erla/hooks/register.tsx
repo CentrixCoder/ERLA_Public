@@ -807,11 +807,17 @@ function exportReferences($: EngineInterface): Promise<string | void> {
     }
     const stamp = new Date(await $.clock.now()).toISOString()
     try {
-      const res = await call<{ written?: string[] }>($, 'export_packet', {
+      const res = await call<{ written?: string[]; error?: string }>($, 'export_packet', {
         name: `references_${stamp.slice(0, 19).replace(/[-:T]/g, '')}`,
         markdown: referencesMarkdown(list, stamp.slice(0, 10)),
       })
-      await say($, `References written to ${(res.written ?? []).join(', ')}`)
+      // a refusal (the check policy, a bad name) comes back as a result, not a thrown error: never report a
+      // file that was not written (correctness audit 2026-10-31: a green "References written to" with no path)
+      if (res.error || !res.written?.length) {
+        await say($, res.error ?? 'export_packet wrote no file', true)
+        return 'Not exported'
+      }
+      await say($, `References written to ${res.written.join(', ')}`)
       return 'Exported'
     } catch (err) {
       await say($, explain('export_packet', err), true)

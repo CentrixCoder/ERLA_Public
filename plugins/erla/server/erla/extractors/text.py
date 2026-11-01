@@ -14,14 +14,29 @@ WINDOW_LINES = 120
 OVERLAP_LINES = 18     # ~15 %
 
 
+TEXT_VERSION = "text-2"   # audit 2026-10-31: line locators count newlines only; UTF-16 files decoded
+
+
 def read_text(path: Path, limit_bytes: int | None = None) -> str:
     raw = Path(path).read_bytes() if limit_bytes is None else Path(path).open("rb").read(limit_bytes)
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        # Notepad "Unicode" / Excel "Unicode Text": cp1252 decodes UTF-16 without an error, into text no search
+        # can match
+        return raw.decode("utf-16", errors="replace")
     for enc in ("utf-8-sig", "cp1252", "latin-1"):
         try:
             return raw.decode(enc)
         except UnicodeDecodeError:
             continue
     return raw.decode("latin-1", errors="replace")
+
+
+def file_lines(text: str) -> list[str]:
+    """The file's lines as an editor numbers them: split at line ends only. str.splitlines() also splits at
+    form feeds, vertical tabs and Unicode line separators, so every page break in a solver output shifted the
+    cited line numbers (correctness audit 2026-10-31: the value on line 5900 was cited as line 5917-6036)."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return lines[:-1] if lines and lines[-1] == "" else lines
 
 
 def line_windows(lines: list[str], res: ExtractResult) -> None:
@@ -38,6 +53,7 @@ def line_windows(lines: list[str], res: ExtractResult) -> None:
 
 class TextExtractor(Extractor):
     exts = ("txt", "md", "json")
+    version = TEXT_VERSION
 
     def extract(self, path: Path) -> ExtractResult:
         try:
@@ -45,7 +61,7 @@ class TextExtractor(Extractor):
         except Exception as exc:
             return ExtractResult(status="failed", error=f"read: {exc}")
         res = ExtractResult(meta={"title": None})
-        lines = text.splitlines()
+        lines = file_lines(text)
         first = next((l.strip("# ").strip() for l in lines if l.strip()), "")
         res.meta["title_guess"] = first[:200] or None
         line_windows(lines, res)
@@ -87,6 +103,7 @@ class F06Extractor(Extractor):
     """Nastran .f06: metadata + message summary chunk + windowed text (capped)."""
 
     exts = ("f06",)
+    version = TEXT_VERSION
     MAX_BYTES = 40 * 1024 * 1024     # index first 40 MB of very large outputs
 
     def extract(self, path: Path) -> ExtractResult:
@@ -110,7 +127,7 @@ class F06Extractor(Extractor):
                    f"messages: {counts}\nepsilon: {eps}")
         res = ExtractResult(meta=meta)
         res.chunks.append(Chunk("summary", summary))
-        line_windows(text.splitlines(), res)
+        line_windows(file_lines(text), res)
         res.status = "ok"
         return res
 

@@ -18,7 +18,9 @@ import re
 BLOCK = re.compile(r"^<!-- full -->[ \t]*\r?\n.*?^<!-- /full -->[ \t]*(?:\r?\n|\Z)", re.M | re.S)
 BLOCK_MARK = re.compile(r"^<!-- /?full -->[ \t]*(?:\r?\n|\Z)", re.M)
 INLINE = re.compile(r"<!--full-->(.*?)<!--/full-->", re.S)
-CORE_LINE = re.compile(r"^<!--core:(.*?)-->[ \t]*(\r?\n|\Z)", re.M | re.S)
+# one line only: with re.S, ".*?" ran past a line end to the next "-->" and dropped the lines between
+# (correctness audit 2026-10-31; no shipped file triggered it yet)
+CORE_LINE = re.compile(r"^<!--core:([^\n]*?)-->[ \t]*(\r?\n|\Z)", re.M | re.S)
 CORE = re.compile(r"<!--core:(.*?)-->", re.S)
 MARKER = re.compile(r"<!--\s*/?full\s*-->|<!--core:")
 

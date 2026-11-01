@@ -364,8 +364,10 @@ class PdfExtractor(Extractor):
                 limit = self.cfg.ocr.max_pages or doc.page_count
                 tally = {"blank": 0, "text": 0, "escalated": 0, "full": 0}
                 confs: list[float] = []
+                failed: list[int] = []
                 for i, page in enumerate(doc):
                     if i >= limit:
+                        res.meta["ocr_skipped_pages"] = doc.page_count - limit      # ocr.max_pages, said aloud
                         break
                     loc, txt = pages[i]
                     if len(txt) < min_chars:
@@ -373,8 +375,12 @@ class PdfExtractor(Extractor):
                             o, mode, conf, words = self._ocr_page(page)
                             o = clean(o)
                         except Exception as exc:
-                            res.error = f"ocr: {exc}"
-                            break
+                            # one page's failure no longer ends OCR for the document: the rest is read, and the
+                            # document stays pending so run_ocr tries the failed pages again (correctness audit
+                            # 2026-10-31: pages after the first error were never read and pending was cleared)
+                            res.error = res.error or f"ocr: {exc}"
+                            failed.append(i + 1)
+                            continue
                         tally[mode] += 1
                         if self.progress:
                             self.progress()
@@ -384,6 +390,9 @@ class PdfExtractor(Extractor):
                             quality[i] = self._page_quality(o, conf, words)
                             res.ocr_used = True
                 res.meta["ocr_pages"] = tally
+                if failed:
+                    res.meta["ocr_failed_pages"] = failed[:200]
+                    res.ocr_pending = True
                 if confs:
                     res.meta["ocr_mean_conf"] = round(sum(confs) / len(confs), 1)
             elif scanned and ocr_ok:

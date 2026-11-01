@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import importlib
 import importlib.metadata
 import io
@@ -38,11 +39,12 @@ import threading
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import __version__, safeio
 from .config import AGENT_ROOT, ConfigError, check_policy, load_config, protocol_dir, validate_config
 from .edition import render
+from .models import IndexJobStatus
 from .safeio import TOOLS_SHIPPED
 from .disciplines import info as disciplines_info
 from .specialists import SPECIALISTS, installed
@@ -166,7 +168,7 @@ def _index_age_days(con) -> tuple[str | None, int | None]:
     return last, (datetime.now(timezone.utc) - ts).days
 
 
-def _read_job_status(status_p: Path) -> dict | None:
+def _read_job_status(status_p: Path) -> IndexJobStatus | None:
     """The index job's status record, or None when no job has run.
 
     The job replaces the file atomically (safeio.write_text_at); a read that still meets a file being
@@ -177,7 +179,7 @@ def _read_job_status(status_p: Path) -> dict | None:
             return None
         try:
             st = json.loads(status_p.read_text(encoding="utf-8"))
-            return st if isinstance(st, dict) else {"state": "unknown"}
+            return cast(IndexJobStatus, st) if isinstance(st, dict) else {"state": "unknown"}
         except (json.JSONDecodeError, OSError):
             time.sleep(0.05)
     return {"state": "unknown", "error": "the job status file could not be read; call index_status again"}
@@ -814,6 +816,14 @@ def t_export_packet(name: str, markdown: str, csv_text: str = "", check_id: str 
     except checkgate.CheckError as exc:
         return {"error": str(exc), "check_policy": check_policy(cfg)}
     stem = SAFE_NAME.sub("_", name).strip("._")[:80] or "result_packet"
+    if SAFE_NAME.search(name) or (cfg.out_dir / f"{stem}.md").exists():
+        # names that differ only in characters dropped here ("σ_max lug", "τ_max lug") or an earlier export
+        # must not overwrite each other (correctness audit 2026-10-31): a short hash of the full name, then a
+        # counter
+        stem = f"{stem}_{hashlib.sha256(name.encode('utf-8')).hexdigest()[:6]}"
+        base, n = stem, 2
+        while (cfg.out_dir / f"{stem}.md").exists():
+            stem, n = f"{base}_{n}", n + 1
     written = [str(safeio.write_text(cfg, cfg.out_dir / f"{stem}.md", markdown))]
     if csv_text:
         written.append(str(safeio.write_text(cfg, cfg.out_dir / f"{stem}.csv", csv_text)))
@@ -823,10 +833,10 @@ def t_export_packet(name: str, markdown: str, csv_text: str = "", check_id: str 
 def t_index_start(full: bool = False, confirm: bool = False, embed: bool = True, ocr: bool = False) -> dict:
     cfg = _cfg()
     status_p, log_p = _job_paths(cfg)
-    st = _read_job_status(status_p)
-    if st is not None:
-        if st.get("state") == "running" and _pid_alive(int(st.get("pid", 0))):
-            return {"error": "an index job is already running", "status": st}
+    prior = _read_job_status(status_p)
+    if prior is not None:
+        if prior.get("state") == "running" and _pid_alive(int(prior.get("pid", 0))):
+            return {"error": "an index job is already running", "status": prior}
     if full and cfg.index_path.is_file() and not confirm:
         return {"needs_confirmation": True,
                 "reason": "full re-index requested; it can take hours on a large library (G8.1).",
@@ -852,7 +862,8 @@ def t_index_start(full: bool = False, confirm: bool = False, embed: bool = True,
         proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
                                 env=env, cwd=str(AGENT_ROOT), creationflags=flags,
                                 start_new_session=(sys.platform != "win32"), close_fds=True)
-    st = {"state": "running", "pid": proc.pid, "started": _now(), "full": full, "embed": embed, "ocr": ocr}
+    st: IndexJobStatus = {"state": "running", "pid": proc.pid, "started": _now(), "full": full, "embed": embed,
+                          "ocr": ocr}
     safeio.write_text_at(status_p, json.dumps(st))
     return {"started": True, **st, "log": str(log_p), "next_step": "poll index_status"}
 
@@ -860,9 +871,10 @@ def t_index_start(full: bool = False, confirm: bool = False, embed: bool = True,
 def t_index_status(tail: int = 20) -> dict:
     cfg = _cfg()
     status_p, log_p = _job_paths(cfg)
-    st = _read_job_status(status_p) or {"state": "never_run"}
+    st: IndexJobStatus = _read_job_status(status_p) or {"state": "never_run"}
     if st.get("state") == "running" and not _pid_alive(int(st.get("pid", 0))):
         st["state"] = "stopped_unexpectedly"
+    tail = max(1, min(int(tail or 20), 500))     # [-0:] returned the whole log (correctness audit 2026-10-31)
     lines = log_p.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:] if log_p.is_file() else []
     return {"status": st, "log_tail": lines}
 
@@ -897,7 +909,7 @@ def job_main(argv: list[str]) -> int:
     a, _ = ap.parse_known_args(argv)
     cfg = load_config()
     status_p, _ = _job_paths(cfg)
-    st = _read_job_status(status_p) or {}
+    st: IndexJobStatus = _read_job_status(status_p) or {}
     st.pop("error", None)
     st.update({"state": "running", "pid": os.getpid(), "phase": "index"})
     safeio.write_text_at(status_p, json.dumps(st))
@@ -905,10 +917,10 @@ def job_main(argv: list[str]) -> int:
     from .cli import _acquire_refresh_lock, _lock_path, _make_heartbeat, _read_lock
     lock = _lock_path(cfg)
     if not _acquire_refresh_lock(lock):
-        st.update({"state": "failed", "finished": _now(),
-                   "error": f"refresh already running (lock {lock}, {_read_lock(lock)})"})
+        msg = f"refresh already running (lock {lock}, {_read_lock(lock)})"
+        st.update({"state": "failed", "finished": _now(), "error": msg})
         safeio.write_text_at(status_p, json.dumps(st, default=str))
-        print(st["error"], flush=True)
+        print(msg, flush=True)
         return 1
 
     def set_phase(name: str) -> None:
@@ -931,8 +943,9 @@ def job_main(argv: list[str]) -> int:
         st.update({"state": "done", "finished": _now(), "phase": None})
         return 0
     except Exception as exc:  # noqa: BLE001
-        st.update({"state": "failed", "error": f"{type(exc).__name__}: {exc}", "finished": _now()})
-        print(st["error"], flush=True)
+        msg = f"{type(exc).__name__}: {exc}"
+        st.update({"state": "failed", "error": msg, "finished": _now()})
+        print(msg, flush=True)
         return 1
     finally:
         safeio.unlink_at(lock)

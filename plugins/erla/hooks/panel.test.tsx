@@ -93,6 +93,8 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
     tools: null as unknown,
     // engtools_start's answer, and the list a started tool shows afterwards (null: the list does not change)
     startRes: { ok: true, url: 'http://127.0.0.1:8050/' } as unknown, toolsAfterStart: null as unknown,
+    // export_packet's answer; null = the file was written
+    exportRes: null as unknown,
     // commands the panel ran with $.process.run, what they answer, and whether this surface refuses them
     runs: [] as string[][], runOut: { exitCode: 0, stdout: '{"ok": true}', stderr: '' }, runFails: false }
   on('tool.list', () => ({ value: [] }))
@@ -133,7 +135,7 @@ function fake(on: Parameters<Parameters<typeof test>[1]>[1]) {
           : { key: 'qwen3-4b', label: 'Qwen3-Reranker 4B (GPU)', available: false,
               reason: 'PyTorch with CUDA needs to be installed for this re-ranker (torch and transformers not found).', fix: 'pip install torch' },
       ] },
-      export_packet: { written: ['C:\\ERLA\\out\\references.md'] },
+      export_packet: rec.exportRes ?? { written: ['C:\\ERLA\\out\\references.md'] },
     }
     return { value: { content: [{ type: 'text', text: JSON.stringify(out[e.tool] ?? {}) }], isError: false } }
   })
@@ -339,6 +341,19 @@ test('documents Claude opens become sources with feedback and an exported refere
 
   await ui.press({ key: 'clear' })
   expect(await ui.find({ type: 'Text', text: /Sources this session \(0\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an export the server refuses is reported as not written', async ($, on) => {
+  const rec = fake(on)
+  rec.exportRes = { error: 'the check policy requires a check_id for this export', check_policy: 'always' }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'erla', args: '' } as never)
+  const ui = await $.ui.mount({ plugin: 'erla', surface: 'desktop', component: 'Pane', props: PANE_PROPS, requestId: 'erla-panel' })
+  await $.tool.call({ tool: 'mcp__plugin_erla_erla__library_show', doc_id: 812 } as never)
+  await ui.press({ key: 'export' })
+  expect(await ui.find({ type: 'Text', text: /the check policy requires a check_id/ })).toBeDefined()
+  expect(await ui.findAll({ type: 'Text', text: /References written to/ })).toHaveLength(0)
   await ui.unmount()
 })
 

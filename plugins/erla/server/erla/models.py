@@ -43,11 +43,12 @@ class ChunkRecord(TypedDict):
     quality_json: str | None
 
 
-JobState = Literal["running", "done", "failed", "stopped_unexpectedly", "never_run"]
+JobState = Literal["running", "done", "failed", "stopped_unexpectedly", "never_run", "unknown"]
 
 
 class IndexJobStatus(TypedDict, total=False):
-    """``logs/index_job.json`` written by the MCP background index job (K2)."""
+    """``logs/index_job.json`` written by the MCP background index job (K2) and read by ``index_status``
+    (``erla.mcp_server``). ``unknown``: the reader met an unreadable or non-object file."""
 
     state: JobState
     pid: int

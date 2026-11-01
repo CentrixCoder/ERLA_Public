@@ -370,10 +370,15 @@ def prepare(con: sqlite3.Connection, units: list[list[str]]) -> Prepared:
     return Prepared(groups=groups, stats=st)
 
 
-def rank(prep: Prepared, p: dict[str, Any], k: int, mode: str = "bm25f") -> tuple[list[tuple[int, float]], set[int], str]:
+def rank(prep: Prepared, p: dict[str, Any], k: int, mode: str = "bm25f",
+         allowed: np.ndarray | None = None) -> tuple[list[tuple[int, float]], set[int], str]:
     """Every chunk holding any query phrase, scored exactly; AND chunks (every concept unit present) first,
     then, when fewer than k, the OR-only chunks (the 0.6 AND->OR rule). Each list is cut to `depth` only
-    after scoring. Returns ([(rowid, score)] best first, AND rowids, 'and' | 'and+or')."""
+    after scoring. Returns ([(rowid, score)] best first, AND rowids, 'and' | 'and+or').
+
+    ``allowed``: the sorted chunk ids a search filter keeps (types, tiers, year, discipline, flags), applied
+    before the cut. Filtering after it lost every allowed chunk ranked below `depth` (correctness audit
+    2026-10-31: a .csv filter found nothing for a word in 701 chunks). None (no filter) changes nothing."""
     st = prep.stats
     if not prep.groups or not st.n:
         return [], set(), "and"
@@ -392,6 +397,10 @@ def rank(prep: Prepared, p: dict[str, Any], k: int, mode: str = "bm25f") -> tupl
             np.add.at(total, pos, phrase_scores(ph, st, p, mode))
     any_hit = present.any(axis=0)
     all_hit = present.all(axis=0)
+    if allowed is not None:
+        keep = np.isin(st.ids, allowed)
+        any_hit &= keep
+        all_hit &= keep
     depth = int(p.get("depth", 600))
 
     def top(mask: np.ndarray) -> list[tuple[int, float]]:
@@ -417,5 +426,5 @@ def rank(prep: Prepared, p: dict[str, Any], k: int, mode: str = "bm25f") -> tupl
 
 
 def search(con: sqlite3.Connection, units: list[list[str]], p: dict[str, Any], k: int,
-           mode: str = "bm25f") -> tuple[list[tuple[int, float]], set[int], str]:
-    return rank(prepare(con, units), p, k, mode)
+           mode: str = "bm25f", allowed: np.ndarray | None = None) -> tuple[list[tuple[int, float]], set[int], str]:
+    return rank(prepare(con, units), p, k, mode, allowed)

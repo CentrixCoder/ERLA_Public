@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Generator, Iterable
@@ -172,9 +173,52 @@ def write_text_at(p: WritablePath, text: str, encoding: str = "utf-8") -> Writab
     return p
 
 
+LOCK_WAIT_S = 30.0
+
+
+@contextmanager
+def _append_lock(p: WritablePath) -> Generator[None, None, None]:
+    """An exclusive cross-process lock on the sidecar ``<name>.lock`` (same checked folder). The server, the
+    web-gate hook, the sub-agent hook, the index job and the CLI all append to one log; without a lock, lines
+    were lost and interleaved (correctness audit 2026-10-31: 1,170 of 9,000 lost from 6 processes). A sidecar,
+    not the log itself: a Windows byte lock on the log would make readers fail while it is held."""
+    fd = os.open(str(p.with_name(p.name + ".lock")), os.O_RDWR | os.O_CREAT, 0o666)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            deadline = time.monotonic() + LOCK_WAIT_S
+            while True:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.002)
+            try:
+                yield
+            finally:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def append_text_at(p: WritablePath, text: str) -> WritablePath:
-    with open(parent_at(p), "a", encoding="utf-8") as fh:
-        fh.write(text)
+    """Append ``text`` whole: one write under the cross-process lock, so concurrent writers never lose or
+    interleave lines."""
+    data = text.encode("utf-8")
+    parent_at(p)
+    with _append_lock(p), open(p, "ab") as fh:
+        fh.write(data)
     return p
 
 

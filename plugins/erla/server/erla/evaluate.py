@@ -18,6 +18,13 @@ Optional per item:
                         left out of the ranking metrics and reported apart: the top hit's re-ranker
                         relevance next to that of the answerable questions. No pass/fail threshold
                         until one is calibrated on this report.
+    filters: {...}      library_search's filters for this question (types, tiers, year_min, discipline,
+                        exclude_flagged), so a filtered search can be measured.
+
+Each row records `hits_sha256`, a hash of the ranked hits it got (document ids, locators and scores), and
+the run records `methods`, the fingerprints of the ranking functions that ran
+(`ranking_evidence.code_methods`): two runs with equal hashes on every question ranked the same, and the
+fingerprints say which code each ran (an `equivalence` record in the ranking evidence register).
 
 Every ranking metric carries a 95% bootstrap interval over the questions (`ci95`), and
 `compare_runs` gives the paired difference of two runs on the same questions, so a change can be
@@ -26,6 +33,7 @@ told apart from the noise of a small golden set (L2).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -39,9 +47,11 @@ import yaml
 
 from . import safeio
 from .config import Config
-from .search import search
+from .search import search, settings
 
 SEARCH_K = 20       # library_search's default k: the eval measures the search ERLA actually runs
+RUN_FORMAT = "erla-eval-evidence/1"   # a run reduced for docs/evals/ (evidence_run)
+FILTERS = {"types": list, "tiers": list, "year_min": int, "discipline": str, "exclude_flagged": bool}
 
 
 def _match(hit, expects: list[str]) -> bool:
@@ -58,6 +68,27 @@ def _check_names(it: dict[str, Any]) -> None:
             if not isinstance(x, str):
                 raise ValueError(f"golden item {it.get('id') or it.get('query')!r}: {key} entry {x!r} is not text; "
                                  f"quote it in the YAML file (YAML turned the name into a number)")
+    f = it.get("filters")
+    if f is None:
+        return
+    name = it.get("id") or it.get("query")
+    if not isinstance(f, dict):
+        raise ValueError(f"golden item {name!r}: filters must be a mapping of {', '.join(FILTERS)}")
+    for k, v in f.items():
+        want = FILTERS.get(k)
+        if want is None:
+            raise ValueError(f"golden item {name!r}: unknown filter {k!r} (one of {', '.join(FILTERS)})")
+        if not isinstance(v, want) or (want is int and isinstance(v, bool)) or (
+                want is list and not all(isinstance(x, str) for x in v)):
+            raise ValueError(f"golden item {name!r}: filter {k} = {v!r} is not {want.__name__}"
+                             + (" of text" if want is list else ""))
+
+
+def hits_sha256(hits) -> str:
+    """Hash of a ranked hit list: document id, locators and score (6 decimals) in rank order."""
+    rows = [[getattr(h, "doc_id", None), list(getattr(h, "locators", None) or []),
+             round(float(getattr(h, "score", 0.0) or 0.0), 6)] for h in hits]
+    return hashlib.sha256(json.dumps(rows, default=str).encode("utf-8")).hexdigest()
 
 
 def _groups(it: dict[str, Any]) -> list[tuple[int, list[str]]]:
@@ -178,7 +209,9 @@ def bootstrap_ci(values: list[float], samples: int = BOOT_SAMPLES, seed: int = B
 
 def _summary(rows: list[dict]) -> dict:
     """Mean of each ranking metric over the rows, with its 95% bootstrap interval."""
-    n = max(len(rows), 1)
+    if not rows:                         # no scored question: no metric (0.0 read as a real, terrible score)
+        return {**{m: None for m in METRICS}, "ci95": {}}
+    n = len(rows)
     out: dict[str, Any] = {m: round(sum(r[m] for r in rows) / n, 3) for m in METRICS}
     out["ci95"] = {m: bootstrap_ci([float(r[m]) for r in rows]) for m in METRICS}
     return out
@@ -196,6 +229,26 @@ def compare_runs(base: dict, new: dict, samples: int = BOOT_SAMPLES, seed: int =
         d = [float(nr[m]) - float(br[m]) for br, nr in pairs]
         out[m] = {"delta": round(sum(d) / len(d), 3) if d else None, "ci95": bootstrap_ci(d, samples, seed)}
     return out
+
+
+def evidence_run(result: dict) -> dict:
+    """A saved run (`erla eval --save`) reduced to what the ranking-evidence gate recomputes from: the golden
+    file's hash, the effective settings and each question's id, class and metrics. Query text and hit titles
+    are dropped, so the file names no library document and can be committed under docs/evals/."""
+    rows = []
+    for r in result.get("rows") or []:
+        rid = str(r.get("id") or "q-" + hashlib.sha256(str(r.get("query") or "").encode("utf-8")).hexdigest()[:12])
+        row: dict[str, Any] = {"id": rid, "class": r.get("class") or "unclassified"}
+        if r.get("hits_sha256"):
+            row["hits_sha256"] = r["hits_sha256"]
+        if r.get("negative"):
+            row["negative"] = True
+        else:
+            row.update({m: r[m] for m in METRICS})
+        rows.append(row)
+    keep = ("ts", "n", "n_scored", *METRICS, "ci95", "by_class", "golden_sha256", "settings", "hybrid", "mode",
+            "reranker", "intent", "methods")
+    return {"format": RUN_FORMAT, **{k: result[k] for k in keep if k in result}, "rows": rows}
 
 
 def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool | None = None,
@@ -219,6 +272,7 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
         kw: dict[str, Any] = {"cfg": cfg, "hybrid": hybrid, "rerank": rerank, "reranker": reranker, "memory": memory}
         if it_intent:
             kw["intent"] = it_intent
+        kw.update(it.get("filters") or {})
         hits, _exp, mode = search(con, it["query"], k=SEARCH_K, **kw)
         secs += time.perf_counter() - t0
         all_hits = hits
@@ -233,7 +287,8 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
         row: dict[str, Any] = {"id": it.get("id"), "query": it["query"],
                                "class": str(it.get("class") or it.get("intent") or "unclassified"),
                                "evidence": verdict, "top": [h.title[:60] for h in hits[:3]],
-                               "top_rerank": getattr(hits[0], "rerank", None) if hits else None}
+                               "top_rerank": getattr(hits[0], "rerank", None) if hits else None,
+                               "hits_sha256": hits_sha256(all_hits)}
         if is_negative(it):               # no expected document: reported apart, with the verdict it drew
             row["negative"] = True
             if verdict:
@@ -287,7 +342,14 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
                               "evidence_calibration": calib, "skipped_unreviewed": len(raw) - len(items),
                               "intent": intent, "sec_per_query": round(secs / n, 2), "hybrid": hybrid,
                               "mode": mode, "reranker": reranker or (cfg.rerank or {}).get("model"),
-                              "golden": str(golden)}
+                              "golden": str(golden),
+                              "golden_sha256": hashlib.sha256(golden.read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
+                              "settings": settings(cfg, intent if intent != "item" else None)}
+    try:
+        from .ranking_evidence import code_methods
+        result["methods"] = code_methods()
+    except (OSError, SyntaxError, KeyError):      # an install without readable sources: no fingerprints recorded
+        pass
     if classes != ["unclassified"]:
         result["by_class"] = by_class
     if neg:
@@ -308,9 +370,8 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
                 prev = rec
                 break
     if prev:
-        result["delta_recall@10"] = round(result["recall@10"] - prev.get("recall@10", 0), 3)
-        result["delta_mrr"] = round(result["mrr"] - prev.get("mrr", 0), 3)
-        if "ndcg@10" in prev:
-            result["delta_ndcg@10"] = round(result["ndcg@10"] - prev["ndcg@10"], 3)
+        for m in ("recall@10", "mrr", "ndcg@10"):
+            if isinstance(result.get(m), (int, float)) and isinstance(prev.get(m), (int, float)):
+                result[f"delta_{m}"] = round(result[m] - prev[m], 3)
     safeio.append_text_at(hist, json.dumps({k: v for k, v in result.items() if k != "rows"}) + "\n")
     return result

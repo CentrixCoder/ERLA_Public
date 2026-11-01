@@ -28,7 +28,7 @@ ALIASES = {
     "ksi-in^0.5": "ksi*inch**0.5", "ksi in^1/2": "ksi*inch**0.5", "ksi*in^0.5": "ksi*inch**0.5",
     "MPa√m": "MPa*m**0.5", "MPa-m1/2": "MPa*m**0.5", "MPa m^1/2": "MPa*m**0.5", "MPa*m^0.5": "MPa*m**0.5",
     "%": "percent", "percent": "percent", "Hz": "Hz",
-    "in/in/°F": "1/degF", "in/in/F": "1/delta_degF", "10^-6 in/in/°F": "1e-6/delta_degF",
+    "in/in/°F": "1/degF", "in/in/F": "1/delta_degF", "10^-6 in/in/°F": "cte_e6_F",
 }
 # Unit tokens recognised inside table headers / labels: "Ftu, ksi", "(MPa)", "E [msi]".
 # Single letters (N, F, m) are excluded here: in a label "cycles, N" N is not newtons.
@@ -57,6 +57,10 @@ def ureg() -> Any:                      # pint's generics differ by version (0.2
     u: Any = registry(autoconvert_offset_to_baseunit=True)
     if "msi" not in u:
         u.define("msi = 1e6 * psi")
+    if "cte_e6_F" not in u:
+        # pint refuses a scale factor inside a unit expression ("1e-6/delta_degF"), so a thermal-expansion
+        # coefficient printed in 10^-6 in/in/°F needs a named unit (correctness audit 2026-10-31)
+        u.define("cte_e6_F = 1e-6 / delta_degF")
     return u
 
 

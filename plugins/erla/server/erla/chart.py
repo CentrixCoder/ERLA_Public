@@ -322,7 +322,10 @@ def read_chart(con: Any, cfg: Any, doc_id: int, locator: str, x: float, color: A
     row = con.execute("SELECT path, ext, classification_flag FROM documents WHERE doc_id=?", (int(doc_id),)).fetchone()
     if row is None:
         return {"status": "REJECTED", "gate": "G1", "reason": f"no document {doc_id}"}
-    out: dict[str, Any] = {"doc_id": int(doc_id), "locator": locator, "x": x, "flag": row[2]}
+    from .classify import copy_group_flags, effective_flag
+    # G2.5: a copy of a flagged document carries its copy group's flag (correctness audit 2026-10-31)
+    flag = effective_flag(row[2], int(doc_id), copy_group_flags(con))
+    out: dict[str, Any] = {"doc_id": int(doc_id), "locator": locator, "x": x, "flag": flag}
     text = ""
     try:
         if (row[1] or "").lower() != "pdf":

@@ -6,7 +6,8 @@ Vectors: L2-normalised float16, stored in the `embeddings` table (resumable).
 Search index (S7), rebuilt by `export_matrix`:
   * faiss installed  -> `vectors.faiss` (exact IndexFlatIP by default; `embeddings.ann: hnsw`
     for approximate HNSW) + `vector_ids.npy`. Memory-mapped on load.
-  * faiss missing    -> `vectors.f16.npy` brute-force matrix + `vector_ids.npy` (pre-0.1.4 path).
+  * faiss missing, or `embeddings.ann: none` -> `vectors.f16.npy` brute-force matrix + `vector_ids.npy`
+    (the no-faiss path; load also falls back to it when `vectors.faiss` is absent).
 Chunks of duplicate documents (exact or near, table `duplicates`) are never embedded (S6).
 """
 
@@ -73,10 +74,6 @@ def signature(cfg) -> str:
     if not ctx and win <= 0 and not p:
         return name                                  # 0.6-compatible rows keep their plain model name
     return f"{name}|ctx{int(ctx)}|w{win}-{ov}-{mx}|p{int(bool(p))}"
-
-
-def sig_model(sig: str | None) -> str:
-    return (sig or "").split("|", 1)[0]
 
 
 def model(cfg):
@@ -368,9 +365,20 @@ def vector_mismatch(cfg, con) -> str | None:
     another model lives in another vector space: searching it with this model's query vector returns noise
     (audit F7). An index exported before 0.7.0 records no model; its dimension is checked at search time."""
     from . import store
-    built = store.get_meta(con, "vector_model") if store.has_table(con, "meta") else None
+    if not store.has_table(con, "meta"):
+        return None
+    built = store.get_meta(con, "vector_model")
     if built and built != model_name(cfg):
         return f"vector index built with {built}, site model is {model_name(cfg)}: run erla refresh"
+    # chunks deleted after the export: their ids may now belong to other text (correctness audit 2026-10-31: an
+    # unrelated document ranked first on a deleted document's vector until the next export)
+    try:
+        deleted = float(store.get_meta(con, "chunks_deleted_at") or 0)
+        exported = paths(cfg)[1].stat().st_mtime
+    except (OSError, ValueError):
+        return None
+    if deleted > exported:
+        return "chunks changed since the vector index was built: vectors resume after the next erla refresh"
     return None
 
 

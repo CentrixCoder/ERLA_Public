@@ -20,25 +20,42 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO, cast
 from urllib.parse import unquote_plus
 
+# The tools this gate inspects. The plugin's PreToolUse matcher (packaging/plugin/hooks/hooks.json) and
+# _OUTBOUND below must name the same set (tests/test_webgate.py checks all three agree).
 GATED = ("WebSearch", "WebFetch")
 
 FIX = ("Web search and fetch stay blocked until the check works: in Claude Desktop turn the ERLA plugin "
        "off and on (or run /erla:setup); tell the user.")
 
 
+def _search_text(tool_input: dict[str, Any]) -> str:
+    # the domain filters go to the search provider with the query
+    domains: list[str] = []
+    for k in ("allowed_domains", "blocked_domains"):
+        v: Any = tool_input.get(k) or []
+        domains += [str(v)] if isinstance(v, str) else [str(d) for d in cast(list[Any], v)]
+    return "\n".join([str(tool_input["query"]), *domains])
+
+
+def _fetch_text(tool_input: dict[str, Any]) -> str:
+    url = str(tool_input["url"])
+    decoded = unquote_plus(url)
+    return url if decoded == url else f"{url}\n{decoded}"
+
+
+_OUTBOUND: dict[str, Callable[[dict[str, Any]], str]] = {"WebSearch": _search_text, "WebFetch": _fetch_text}
+
+
 def outbound_text(tool: str, tool_input: dict[str, Any]) -> str | None:
     """What the call would send to a third party, or None for a tool the gate does not cover.
-    A gated tool without its field raises (schema change), which the caller turns into a deny."""
-    if tool == "WebSearch":
-        return str(tool_input["query"])
-    if tool == "WebFetch":
-        url = str(tool_input["url"])
-        decoded = unquote_plus(url)
-        return url if decoded == url else f"{url}\n{decoded}"
-    return None
+    A gated tool without its field raises (schema change), and so does a GATED name without an
+    extractor; the caller turns either into a deny (fail closed)."""
+    if tool not in GATED:
+        return None
+    return _OUTBOUND[tool](tool_input)
 
 
 def decide(payload: dict[str, Any]) -> str | None:

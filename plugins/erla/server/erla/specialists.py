@@ -1,8 +1,12 @@
-"""Specialist sub-agents: registry, lessons ledger and library-addition triggers.
+"""Discipline registry, lessons ledger and library-addition triggers.
 
-ERLA is the lead agent; discipline specialists, where installed, are workers it delegates to. Each
-specialist module declares its registry entry (``SPECIALIST``: key, agent, skill file, calculation tool,
-topic terms, verify-gate quantities); this module discovers the ones the build ships. The free core
+ERLA is the lead agent and does the discipline work itself: since ADR-0002 each engineering discipline,
+where installed, is a skill the lead loads (named by the module's ``skill`` entry), with no worker agent
+in between and no ``agent`` field in the registry. The module keeps its
+"specialist" name because its trigger keys (``specialist_lesson``, ``specialist_library_additions``) are
+persisted in site logs (ADR-0002, Phase 1 amendment). Each discipline module declares its registry entry
+(``SPECIALIST``: key, skill and skill file, calculation tool, topic terms, verify-gate quantities); this
+module discovers the ones the build ships. The free core
 edition ships none. Skill files are protocol files (precedence below skills.md) and change only through
 the protocol review (rules section 9) after the user approves each change.
 This module records the two events that make a specialist skill file due for review:

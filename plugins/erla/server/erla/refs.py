@@ -168,6 +168,59 @@ def site_rules(cfg: Any = None) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ extraction
+class _Spans:
+    """Half-open character spans [a, b) of one text, with the three questions extract() asks answered by
+    position marks instead of a scan of every span so far (that scan was O(n^2) per text; S11, 0.7.x).
+
+    Exactly the answers of the scan over the added spans (tests/test_index_writer.py checks it against
+    the scan on random spans): overlaps(a, b) = any(a < y and x < b), covers(p) = any(x <= p < y),
+    starts_in(lo, hi) = any(lo <= x < hi)."""
+
+    __slots__ = ("n", "occ", "starts", "spans", "points")
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.occ: bytearray | None = None        # occ[i] = 1: position i lies inside a non-empty span
+        self.starts: bytearray | None = None     # starts[i] = 1: a span starts at i
+        self.spans: list[tuple[int, int]] = []
+        self.points: list[int] = []              # empty spans (a == b): no position marks
+
+    def add(self, a: int, b: int) -> None:
+        if self.occ is None or self.starts is None:
+            self.occ, self.starts = bytearray(self.n + 1), bytearray(self.n + 1)
+        self.spans.append((a, b))
+        if not 0 <= a <= b <= self.n:            # outside the text: the marks cannot hold it
+            self.n = -1                          # answer every later question by the scan
+        elif b > a:
+            self.occ[a:b] = b"\x01" * (b - a)
+        else:
+            self.points.append(a)
+        if self.n >= 0:
+            self.starts[a] = 1
+
+    def overlaps(self, a: int, b: int) -> bool:
+        if not self.spans:
+            return False
+        if self.occ is None or self.n < 0 or not 0 <= a < b <= self.n:
+            return any(a < y and x < b for x, y in self.spans)
+        return self.occ.find(1, a, b) >= 0 or any(a < x < b for x in self.points)
+
+    def covers(self, p: int) -> bool:
+        if not self.spans:
+            return False
+        if self.occ is None or self.n < 0 or not 0 <= p < self.n:
+            return any(x <= p < y for x, y in self.spans)
+        return self.occ[p] == 1
+
+    def starts_in(self, lo: int, hi: int) -> bool:
+        if not self.spans:
+            return False
+        if self.starts is None or self.n < 0:
+            return any(lo <= x < hi for x, _y in self.spans)
+        lo, hi = max(lo, 0), min(hi, self.n + 1)
+        return lo < hi and self.starts.find(1, lo, hi) >= 0
+
+
 def extract(texts, rules: dict[str, Any] | None = None, max_chars: int = 2_000_000) -> dict[str, dict[str, Any]]:
     """Every reference printed in the texts: {key: {kind, id, n, editions}} (first spelling kept as id)."""
     rules = rules or site_rules()
@@ -203,23 +256,23 @@ def extract(texts, rules: dict[str, Any] | None = None, max_chars: int = 2_000_0
                     continue
                 rev = m.group(2) if (m.lastindex or 0) >= 2 and kind != "spec" else None
                 cands.append((m.start(1), m.end(1), rank, kind, m.group(1), rev or None))
-        taken: list[tuple[int, int]] = []
+        taken = _Spans(len(t))
         for a, b, _r, kind, ident, rev in sorted(cands, key=lambda c: (-(c[1] - c[0]), c[2], c[0])):
-            if any(a < y and x < b for x, y in taken):
+            if taken.overlaps(a, b):
                 continue                          # overlapping spans: the longest (DIN EN ISO 4762), then kind
-            taken.append((a, b))
+            taken.add(a, b)
             add(kind, ident, rev)
         for pat, kind in rules.get("site", []):
             for m in pat.finditer(t):
                 add(kind if kind in _PREFIX else "site", m.group(1) if pat.groups else m.group(0))
-        named: list[tuple[int, int]] = []
+        named = _Spans(len(t))
         for pat, canon, low in rules.get("books", ()):
             if low not in tl:
                 continue
             for m in pat.finditer(t):
-                if any(a <= m.start() < b for a, b in named):
+                if named.covers(m.start()):
                     continue
-                named.append((m.start(), m.end()))
+                named.add(m.start(), m.end())
                 add("book", canon, _edition(t[m.end(): m.end() + EDITION_WINDOW]))
         if any(h in tl for h in _EDITION_HINTS):
             for m in _EDITION.finditer(t):            # edition markers are rare: look back from each for its name
@@ -232,8 +285,8 @@ def extract(texts, rules: dict[str, Any] | None = None, max_chars: int = 2_000_0
                     continue
                 name = nm.group(1)
                 if (name.split()[0] in _NOT_A_NAME
-                        or any(base <= a < m.end() for a, b in named)            # a known name in the citation
-                        or any(a <= nm.start(1) < b for a, b in taken)):
+                        or named.starts_in(base, m.end())                       # a known name in the citation
+                        or taken.covers(nm.start(1))):
                     continue
                 add("book", name, m.group(1) or m.group(2) or str(_ORDINAL_WORDS[m.group(3).lower()]))
         if seen >= max_chars:
@@ -251,15 +304,17 @@ def identify(title: str | None, path: str | None, head: str = "", rules: dict[st
 
 # ------------------------------------------------------------------ index
 def record_document(con: sqlite3.Connection, doc_id: int, texts: list[str], own_standard: str | None,
-                    rules: dict[str, Any] | None = None) -> int:
-    """Write one document's citations and identity (writer connections). Returns how many references it cites."""
+                    rules: dict[str, Any] | None = None, found: dict[str, dict[str, Any]] | None = None) -> int:
+    """Write one document's citations and identity (writer connections). Returns how many references it cites.
+    `found` is extract(texts, rules) when the caller computed it already (the indexer's workers do, S11)."""
     if not store.has_table(con, "refs"):
         return 0
     rules = rules or site_rules()
     d = con.execute("SELECT title, path FROM documents WHERE doc_id=?", (doc_id,)).fetchone()
     is_ = identify(d[0] if d else None, d[1] if d else None, texts[0] if texts else "", rules)
     own = {k for k in is_} | ({std_key(own_standard)} if own_standard else set())
-    found = extract(texts, rules)
+    if found is None:
+        found = extract(texts, rules)
     rows = [(doc_id, k, v["id"], v["n"], v["kind"], ",".join(v["editions"]) or None)
             for k, v in found.items() if k not in own and v["n"] >= MIN_COUNT]
     con.execute("DELETE FROM refs WHERE doc_id=?", (doc_id,))

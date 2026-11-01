@@ -19,12 +19,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
 from . import safeio
 from .config import Config, check_policy
+from .verify import numbers
 
 VERDICTS = ("PASS", "PASS WITH FINDINGS", "FAIL")
 CHECKERS = ("erla:professor", "self-check")
@@ -33,6 +35,7 @@ OUT = ("out of tolerance", "units differ", "contradiction")
 NOT_CONVERGED = (*OUT, "not checked")  # no result that ERLA and the Professor both support (owner, 2026-10-17)
 DECISION = "decision"                 # units of a yes/no or label conclusion: critical / not critical, separates ...
 STAGES = ("opus", "fable")            # the Professor on Opus first; Fable only when that check did not converge
+FIRST_STAGE, LAST_STAGE = STAGES
 MAX_ROUNDS = 3                        # the first check plus at most 2 rework rounds per stage
 # Model currency (0.5.2): the Professor's agent file names model families (aliases), which Claude Code resolves to
 # the newest model of each family. Every check records the exact model it ran on; a model without a passing
@@ -41,7 +44,6 @@ MODEL_ID = re.compile(r"^claude-[a-z]+(?:-[a-z0-9]+)*$")
 CATCH_TARGET, FALSE_ALARM_MAX = 0.90, 0.10
 CAL_MIN_FAULTY, CAL_MIN_CONTROLS = 10, 5
 CALIBRATION_LOG = "professor_calibration.jsonl"
-NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 ID = re.compile(r"^k-[0-9a-f]{12}$")
 # Coverage (rules R4.7, guardrails G3.8 and G6.3, instructions W9 step 3a; owner 2026-10-24): a check of a margin, a
 # design value or a program audits the draft's coverage inventory, one row per configuration and failure mode. A PASS
@@ -80,10 +82,13 @@ def _number(v: Any, what: str) -> float:
         raise CheckError(f"{what}: a number is required, got {v!r}")
     if isinstance(v, (int, float)):
         return float(v)
-    m = NUM.search(str(v))
-    if not m:
-        raise CheckError(f"{what}: a number is required, got {v!r}")
-    return float(m.group(0))
+    # verify.numbers reads thousands commas and a unicode minus; a value with two numbers (a range, an alloy
+    # name before the value) is refused, not read as its first digits (correctness audit 2026-10-31: "1,000"
+    # was read as 1.0 and "−0.05" as +0.05, so a check could agree with the wrong number)
+    found = numbers(str(v))
+    if len(found) != 1:
+        raise CheckError(f"{what}: give exactly one number (units apart), got {v!r}")
+    return found[0][0]
 
 
 def _obj(x: Any) -> dict[str, Any] | None:
@@ -119,7 +124,8 @@ def open_check(cfg: Config, packet_in: Any, rework_of: str = "", escalate_from: 
     _coverage_rows(packet)
     stage, rnd, prior = _chain(cfg, rework_of, escalate_from)
     body = json.dumps(packet, sort_keys=True, ensure_ascii=False, default=str)
-    cid = "k-" + hashlib.sha256(f"{body}|{_now()}".encode()).hexdigest()[:12]
+    # a random salt: two opens of one packet in the same second must not share (and overwrite) one record
+    cid = "k-" + hashlib.sha256(f"{body}|{_now()}|{secrets.token_hex(8)}".encode()).hexdigest()[:12]
     rec: dict[str, Any] = {"check_id": cid, "state": "open", "opened": _now(), "packet": packet, "estimates": [],
                            "comparison": [], "stage": stage, "round": rnd, "prior": prior}
     _save(cfg, rec)
@@ -139,18 +145,18 @@ def _chain(cfg: Config, rework_of: str, escalate_from: str) -> tuple[str, int, s
             raise CheckError(f"check {rework_of} is {prior['state']}: close it before a rework")
         rnd = int(prior.get("round") or 1) + 1
         if rnd > MAX_ROUNDS:
-            nxt = ("escalate to the Professor on Fable (escalate_from)" if prior.get("stage", "opus") == "opus"
+            nxt = ("escalate to the Professor on Fable (escalate_from)" if prior.get("stage", FIRST_STAGE) == FIRST_STAGE
                    else "report the result UNRESOLVED (outcome 'unresolved')")
             raise CheckError(f"{MAX_ROUNDS - 1} rework rounds are used up at this stage: {nxt}")
-        return str(prior.get("stage") or "opus"), rnd, rework_of
+        return str(prior.get("stage") or FIRST_STAGE), rnd, rework_of
     if escalate_from:
         prior = load(cfg, escalate_from)
-        if prior["state"] != "closed" or prior.get("stage", "opus") != "opus":
+        if prior["state"] != "closed" or prior.get("stage", FIRST_STAGE) != FIRST_STAGE:
             raise CheckError("escalate only from a closed check of the Professor on Opus")
         if prior.get("converged"):
             raise CheckError(f"check {escalate_from} converged: no escalation to Fable")
-        return "fable", 1, escalate_from
-    return "opus", 1, ""
+        return LAST_STAGE, 1, escalate_from
+    return FIRST_STAGE, 1, ""
 
 
 def _coverage_rows(packet: dict[str, Any]) -> list[dict[str, Any]]:
@@ -295,7 +301,7 @@ def close(cfg: Config, check_id: str, verdict: str, findings: Any = None,
         raise CheckError(f"verdict must be one of {list(VERDICTS)}")
     if checker not in CHECKERS:
         raise CheckError(f"checker must be one of {list(CHECKERS)}")
-    stage = str(rec.get("stage") or "opus")
+    stage = str(rec.get("stage") or FIRST_STAGE)
     if checker == "erla:professor" and str(model).strip().lower() != stage:
         raise CheckError(f"this check is the Professor on {stage.title()}: close it with model '{stage}' "
                          "(the model you run on)")
@@ -410,7 +416,7 @@ def _next_step(rec: dict[str, Any]) -> str:
     unresolved = ("report UNRESOLVED - no solution can be established from the available sources; never "
                   "contrive one")
     more = int(rec.get("round") or 1) < MAX_ROUNDS
-    if str(rec.get("stage") or "opus") == "opus":
+    if str(rec.get("stage") or FIRST_STAGE) == FIRST_STAGE:
         return ("not converged: fix the draft and open a rework check (rework_of)" if more else
                 "not converged after the rework rounds: escalate to the Professor on Fable (escalate_from)")
     return (f"not converged on Fable: re-check (rework_of) only with a fix the sources support; otherwise {unresolved}"
@@ -420,7 +426,7 @@ def _next_step(rec: dict[str, Any]) -> str:
 def status(cfg: Config, check_id: str) -> dict[str, Any]:
     """What the lead may see: the state, and once closed the verdict, comparison and findings."""
     rec = load(cfg, check_id)
-    out: dict[str, Any] = {"check_id": check_id, "state": rec["state"], "stage": rec.get("stage", "opus"),
+    out: dict[str, Any] = {"check_id": check_id, "state": rec["state"], "stage": rec.get("stage", FIRST_STAGE),
                            "round": rec.get("round", 1), "prior": rec.get("prior", "")}
     if rec["state"] == "closed":
         out.update(verdict=rec["verdict"], checker=rec["checker"], comparison=rec["comparison"],
@@ -486,7 +492,7 @@ def gate(cfg: Config, needed: bool, check_id: str, unchecked_reason: str, unreso
                "converged": st["converged"], "model_id": st.get("model_id"), "calibrated": st.get("calibrated")}
         if st["converged"]:
             return rec
-        if st["stage"] != "fable" or st["checker"] != "erla:professor":
+        if st["stage"] != LAST_STAGE or st["checker"] != "erla:professor":
             if st["checker"] == "self-check" and unresolved:
                 return {**rec, "outcome": "unresolved"}
             raise CheckError(f"check {check_id} did not converge ({st.get('next', '')}); it cannot be recorded as a "

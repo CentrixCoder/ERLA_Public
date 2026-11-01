@@ -97,8 +97,20 @@ class XlsExtractor(Extractor):
 
 
 # --------------------------------------------------------------------- PPTX
+def _shapes(shapes):
+    """Every shape on a slide, the members of grouped shapes included (a group has no text of its own:
+    correctness audit 2026-10-31, the margins in a grouped pair of text boxes were lost)."""
+    for shp in shapes:
+        inner = getattr(shp, "shapes", None)
+        if inner is not None and not getattr(shp, "has_text_frame", False):
+            yield from _shapes(inner)
+        else:
+            yield shp
+
+
 class PptxExtractor(Extractor):
     exts = ("pptx",)
+    version = "pptx-2"            # audit 2026-10-31: text inside grouped shapes
 
     def extract(self, path: Path) -> ExtractResult:
         from pptx import Presentation
@@ -115,7 +127,7 @@ class PptxExtractor(Extractor):
                     "slide_count": len(prs.slides)}
         for i, slide in enumerate(prs.slides, 1):
             parts, has_table = [], False
-            for shp in slide.shapes:
+            for shp in _shapes(slide.shapes):
                 if getattr(shp, "has_text_frame", False) and shp.text_frame.text.strip():
                     parts.append(shp.text_frame.text)
                 if getattr(shp, "has_table", False):

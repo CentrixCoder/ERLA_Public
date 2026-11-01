@@ -115,7 +115,11 @@ def cmd_web_allow(a) -> int:
 def cmd_check_policy(a) -> int:
     if not a.policy:
         from .config import check_policy, load_config
-        cfg = load_config(_site(a) / "config" / "library_config.yaml", validate=False)
+        from .config import ConfigError
+        try:
+            cfg = load_config(_site(a) / "config" / "library_config.yaml", validate=False)
+        except ConfigError as exc:                 # no site yet: a message, not a traceback
+            sys.exit(f"erla check-policy: {exc}")
         _out(json.dumps({"policy": check_policy(cfg)}))
         return 0
     from .site import SiteError, set_check_policy

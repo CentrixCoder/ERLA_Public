@@ -26,8 +26,9 @@ from datetime import datetime, timezone
 from . import quality, units
 from .models import PropertyRecord
 
-VERSION = "props-3"     # 0.3.1: no condition copied into a column between two different merged headings
-#                         (props-2, 0.2.16: spanned condition cells split by column; wrapped thickness ranges)
+VERSION = "props-4"     # audit 2026-10-31: "Tensile Strength, Yield" and "Yield Tensile Strength" are Fty, not Ftu
+#                         (props-3, 0.3.1: no condition copied into a column between two different merged headings;
+#                         props-2, 0.2.16: spanned condition cells split by column; wrapped thickness ranges)
 RANGE_UNIT = {"E": "msi", "Ec": "msi", "G": "msi", "KIc": "ksi√in", "density": "lb/in3"}
 
 # Order matters: the first match wins (specific before general).
@@ -36,6 +37,9 @@ QUANTITY_PATTERNS = [
     ("Fbru", r"^f\s*bru\b|^fbru\b|bearing ultimate"),
     ("Fbry", r"^f\s*bry\b|^fbry\b|bearing yield"),
     ("Fsu", r"^f\s*su\b|^fsu\b|ultimate shear strength|shear ultimate|shear strength"),
+    # a tensile strength label that also says yield (the datasheet layout "Tensile Strength, Yield") is the yield
+    # strength: checked before Ftu's "tensile strength"
+    ("Fty", r"\byield\b.*\btensile\b|\btensile\b.*\byield\b"),
     ("Ftu", r"^f\s*tu\b|^ftu\b|ultimate tensile strength|tensile ultimate|tensile strength|^uts\b|^sut\b|^rm\b"),
     ("Fty", r"^f\s*ty\b|^fty\b|tensile yield|^yield strength|^yield\b|^sy\b|^rp0\.?2\b"),
     ("elongation", r"^e\s*,\s*percent|^elongation|^elong\b|^e\s*,\s*%|^e\s*\(%\)"),

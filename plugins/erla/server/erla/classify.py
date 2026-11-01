@@ -16,34 +16,53 @@ import yaml
 from .config import config_file
 
 # ---------------------------------------------------------------- markings
+def _words(phrase: str) -> str:
+    """A marking phrase as a pattern: any run of white space (a line break in extracted page text) or a
+    line-end hyphenation between its words."""
+    return r"(?:\s+|-\s*)".join(phrase.split())
+
+
 MARKING_PATTERNS = [
-    ("ITAR", re.compile(r"\bITAR\b|INTERNATIONAL TRAFFIC IN ARMS", re.I)),
-    ("EAR", re.compile(r"\bEAR99\b|\bECCN\b|EXPORT ADMINISTRATION REGULATIONS", re.I)),
-    ("EXPORT_CONTROLLED", re.compile(r"EXPORT[- ]CONTROLLED|EXPORT CONTROL(?:LED)? (?:INFORMATION|DATA)", re.I)),
-    ("CUI", re.compile(r"\bCUI\b|CONTROLLED UNCLASSIFIED INFORMATION", re.I)),
-    ("PROPRIETARY", re.compile(r"\bPROPRIETARY\b|COMPANY CONFIDENTIAL|\bCONFIDENTIAL\b", re.I)),
-    ("DISTRIBUTION_LIMITED", re.compile(r"DISTRIBUTION STATEMENT [B-F]\b", re.I)),
+    # the DoD Directive 5230.25 export warning names the Arms Export Control Act (ITAR) and the Export
+    # Administration Act (EAR) without saying "ITAR" or "EAR" (correctness audit 2026-10-31)
+    ("ITAR", re.compile(rf"\bITAR\b|{_words('INTERNATIONAL TRAFFIC IN ARMS')}|{_words('ARMS EXPORT CONTROL ACT')}",
+                        re.I)),
+    ("EAR", re.compile(rf"\bEAR99\b|\bECCN\b|{_words('EXPORT ADMINISTRATION REGULATIONS')}|"
+                       rf"{_words('EXPORT ADMINISTRATION ACT')}", re.I)),
+    ("EXPORT_CONTROLLED", re.compile(rf"EXPORT(?:\s+|-\s*)CONTROLLED|EXPORT\s+CONTROL(?:LED)?\s+(?:INFORMATION|DATA)",
+                                     re.I)),
+    ("CUI", re.compile(rf"\bCUI\b|{_words('CONTROLLED UNCLASSIFIED INFORMATION')}", re.I)),
+    ("PROPRIETARY", re.compile(rf"\bPROPRIETARY\b|{_words('COMPANY CONFIDENTIAL')}|\bCONFIDENTIAL\b", re.I)),
+    ("DISTRIBUTION_LIMITED", re.compile(rf"{_words('DISTRIBUTION STATEMENT')}(?:\s+|-\s*)[B-F]\b", re.I)),
 ]
-# Phrases that mention the words without marking the document (reduce false flags)
-BENIGN = re.compile(r"(?:non[- ]?proprietary|not (?:proprietary|export controlled)|"
-                    r"distribution statement a|approved for public release)", re.I)
+# Phrases that contain a marking word without marking the document (reduce false flags). Only a phrase that
+# contains the match itself clears it: an earlier "non-proprietary" never hides a later "ACME PROPRIETARY".
+BENIGN = re.compile(r"non[- ]?proprietary|not\s+(?:proprietary|export\s+controlled)", re.I)
+# A public-release statement next to a distribution statement B-F (a superseded marking quoted in a released
+# document); "NOT approved for public release" is not one.
+PUBLIC_RELEASE = re.compile(r"(?<!not\s)approved\s+for\s+public\s+release", re.I)
+
+
+def _benign(name: str, sample: str, m: re.Match[str]) -> bool:
+    if any(b.start() <= m.start() and m.end() <= b.end()
+           for b in BENIGN.finditer(sample, max(0, m.start() - 20), m.end() + 20)):
+        return True
+    if name == "DISTRIBUTION_LIMITED":
+        return PUBLIC_RELEASE.search(sample[max(0, m.start() - 40): m.end() + 40]) is not None
+    return False
 
 
 def detect_markings(text_head: str, text_tail: str = "") -> str | None:
     """Return the most restrictive marking found in the first/last pages, else None.
-    G2.5: an explicit marking anywhere in head/tail flags the document."""
+    G2.5: an explicit marking anywhere in head/tail flags the document; every occurrence is tried, so
+    one benign mention does not hide a real marking."""
     sample = f"{text_head}\n{text_tail}"
     if not sample.strip():
         return None
     found = []
     for name, pat in MARKING_PATTERNS:
-        m = pat.search(sample)
-        if not m:
-            continue
-        window = sample[max(0, m.start() - 40): m.end() + 40]
-        if name in ("PROPRIETARY", "DISTRIBUTION_LIMITED") and BENIGN.search(window):
-            continue
-        found.append(name)
+        if any(not _benign(name, sample, m) for m in pat.finditer(sample)):
+            found.append(name)
     return most_restrictive(found)
 
 
@@ -371,6 +390,7 @@ _CONFUSABLES = str.maketrans({
     "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x", "Α": "a", "Β": "b",
     "Ε": "e", "Ζ": "z", "Η": "h", "Ι": "i", "Κ": "k", "Μ": "m", "Ν": "n", "Ο": "o", "Ρ": "p", "Τ": "t",
     "Υ": "y", "Χ": "x"})
+_IDNA_RE = re.compile(r"\bxn--[a-z0-9-]+", re.I)
 _B64_RE = re.compile(r"[A-Za-z0-9+/_-]{12,}={0,2}")
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:[-.][a-z0-9]+)*")
 # words of a classification marking itself; they identify no program, part or person
@@ -385,8 +405,15 @@ def _normalize(text: str) -> str:
     return "".join(ch for ch in t if unicodedata.category(ch) != "Cf").translate(_CONFUSABLES)
 
 
+def _plain(text: str) -> str:
+    """Accents removed and German sharp s spelled out, case kept: search engines treat "Müllerhaus" and
+    "Mullerhaus", "Straße" and "Strasse" as one word, so the gate must too (correctness audit 2026-10-31)."""
+    t = "".join(ch for ch in unicodedata.normalize("NFKD", text) if unicodedata.category(ch) != "Mn")
+    return t.replace("ß", "ss").replace("ẞ", "SS")
+
+
 def _fold(text: str) -> str:
-    return re.sub(r"[\W_]+", " ", _normalize(text).lower()).strip()
+    return re.sub(r"[\W_]+", " ", _plain(_normalize(text)).casefold()).strip()
 
 
 def expand_outbound(text: str) -> str:
@@ -399,6 +426,11 @@ def expand_outbound(text: str) -> str:
             break
         out.append(nxt)
         cur = nxt
+    for label in _IDNA_RE.findall(cur):                 # a punycode host label is the name it encodes
+        try:
+            out.append(label.encode("ascii").decode("idna"))
+        except UnicodeError:
+            continue
     for tok in _B64_RE.findall(cur):
         for decode in (base64.urlsafe_b64decode, base64.b64decode):
             try:
@@ -460,9 +492,10 @@ def _restricted_name(con: sqlite3.Connection, q: str, docs: list, flagged: set[i
             "SELECT c.doc_id, c.text FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.rowid "
             "JOIN documents d ON d.doc_id = c.doc_id WHERE chunks_fts MATCH ? AND d.classification_flag IS NULL "
             "LIMIT 50", (match,)).fetchall()
-        if any(r["doc_id"] not in flagged and rx.search(r["text"] or "") for r in unflagged):
+        if any(r["doc_id"] not in flagged and rx.search(_plain(r["text"] or "")) for r in unflagged):
             continue                                    # used in unflagged text: generic
-        occurrences = [m.group(0) for r in rows if r["doc_id"] in flagged for m in rx.finditer(r["text"] or "")]
+        occurrences = [m.group(0) for r in rows if r["doc_id"] in flagged
+                       for m in rx.finditer(_plain(r["text"] or ""))]
         named = [r for r in docs if r["doc_id"] in flagged
                  and rx.search(_fold(f"{Path(r['path']).stem} {r['title'] or ''}"))]
         source = {r["doc_id"] for r in rows if r["doc_id"] in flagged} | {r["doc_id"] for r in named}

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.1-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.7.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -16,6 +16,27 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 0.7.2
+
+- **A correctness audit fixed 21 defects**, each with a test that fails on 0.7.1.
+- **Export-control markings are caught where they were missed:** across line breaks and hyphenated line ends,
+  the Arms Export Control Act and Export Administration Act wordings, and a marking repeated after a benign
+  phrase. More documents may be flagged after the next refresh.
+- **The web gate** folds accents and decodes `xn--` host names before it checks a query, and checks a search's
+  allowed and blocked domains too.
+- **Value checks are stricter:** a value under another quantity's column fails, and a number on a table page
+  that is in no extracted row is unconfirmed.
+- **Search filters** (file type, tier, year, discipline, flagged) now find documents that ranked below the
+  first 600 keyword matches, and a `.docx` copy of a `.doc` when the filter drops the `.doc`;
+  unfiltered searches rank exactly as before.
+- **Readers:** EPUB superscripts are no longer read as more digits of a value, DOCX tables inside content
+  controls and text in grouped PowerPoint shapes are read, OCR goes on past a page that fails, UTF-16 text files
+  are decoded.
+- **Indexing** is faster with several workers, reads a copied or looped folder once, reports folders it cannot
+  read, and refuses library roots nested in each other.
+- **Upgrade:** after updating, quit and reopen the Claude app and run `erla refresh`; it re-reads text,
+  Markdown, JSON, DOCX, EPUB and PPTX files (PDFs and spreadsheets are not re-read).
+
 ### 0.7.1
 
 - **Update before your first refresh under 0.7.0.** The full-text upgrade that 0.7.0's first `erla refresh` runs
@@ -45,13 +66,6 @@ Updated automatically at every release; older versions are listed under
 - **Feedback follows the file** and, with your question, counts only for that topic.
 - **Upgrade:** run `erla refresh` once after updating (it rebuilds the search index and re-embeds every chunk;
   allow an hour or more on a large library).
-
-### 0.6.0
-
-- **Old Word (`.doc`) files are read completely again.** When Word was slow to respond, ERLA read some `.doc`
-  files without it and meant to try Word again on the next refresh, but kept serving the first reading, so the
-  index stayed "out of date". The next refresh now gives those files to Word.
-- The index remembers when each document was first added, even after a full re-index.
 
 <!-- release-notes:end -->
 

@@ -287,7 +287,39 @@ def keyword_units(exp: Expansion) -> list[list[str]]:
     return out
 
 
-def _keyword(con, exp: Expansion, k: int, cfg, s: dict[str, Any]) -> tuple[list[tuple[int, float]], set[int], str]:
+def _allowed_docs(con, types, tiers, year_min, discipline, exclude_flagged) -> set[int] | None:
+    """Ids of the documents a search filter keeps, or None when no filter is set. The same tests as the
+    post-filter in _candidates (G2.5: a copy of a flagged document is filtered as flagged)."""
+    if not (types or tiers or year_min or discipline or exclude_flagged):
+        return None
+    from .classify import copy_group_flags, effective_flag
+    groups = copy_group_flags(con) if exclude_flagged else {}
+    return {r["doc_id"] for r in con.execute(
+        "SELECT doc_id, ext, authority_tier, year, discipline, classification_flag FROM documents")
+        if not (types and r["ext"] not in types)
+        and not (tiers and (r["authority_tier"] or "T5") not in tiers)
+        and not (year_min and (r["year"] or 0) < year_min)
+        and not (discipline and (r["discipline"] or "") != discipline)
+        and not (exclude_flagged and effective_flag(r["classification_flag"], r["doc_id"], groups))}
+
+
+def _allowed_chunks(con, docs: set[int] | None):
+    """Sorted chunk ids of `docs` (from _allowed_docs), or None when no filter is set."""
+    if docs is None:
+        return None
+    import numpy as np
+
+    keep = sorted(docs)
+    ids: list[int] = []
+    for i in range(0, len(keep), 500):
+        part = keep[i:i + 500]
+        ids += [r[0] for r in con.execute(f"SELECT chunk_id FROM chunks WHERE doc_id IN ({','.join('?' * len(part))})",
+                                          part)]
+    return np.array(sorted(ids), dtype=np.int64)
+
+
+def _keyword(con, exp: Expansion, k: int, cfg, s: dict[str, Any],
+             allowed=None) -> tuple[list[tuple[int, float]], set[int], str]:
     """Keyword channel: [(chunk_id, score)] best first, the AND chunk ids, and 'and' | 'and+or'.
 
     engine 'erla' (default): exact BM25F with Lucene IDF over EVERY matching chunk (erla.bm25), cut to
@@ -299,15 +331,24 @@ def _keyword(con, exp: Expansion, k: int, cfg, s: dict[str, Any]) -> tuple[list[
         units = keyword_units(exp)
         if not units:
             return [], set(), "and"
-        return bm25.search(con, units, p, k)
+        return bm25.search(con, units, p, k, allowed=allowed)
     bm = _bm25_sql(con, s)
+    keep = set(int(x) for x in allowed) if allowed is not None else None
 
     def run(m: str):
         expr = exp.fts(m)
         if not expr:
             return []
-        return [(r[0], -r[1]) for r in con.execute(f"SELECT rowid, {bm} AS s FROM chunks_fts WHERE chunks_fts MATCH ? "
-                                                    "ORDER BY s LIMIT 600", (expr,))]
+        if keep is None:
+            return [(r[0], -r[1]) for r in con.execute(
+                f"SELECT rowid, {bm} AS s FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY s LIMIT 600", (expr,))]
+        out: list[tuple[int, float]] = []              # filtered: walk the ranking until 600 allowed rows
+        for r in con.execute(f"SELECT rowid, {bm} AS s FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY s", (expr,)):
+            if r[0] in keep:
+                out.append((r[0], -r[1]))
+                if len(out) >= 600:
+                    break
+        return out
 
     rows_and = run("and")
     rows = list(rows_and)
@@ -329,7 +370,9 @@ def _candidates(con, query: str, k: int, types, tiers, year_min, discipline, exc
     words = [v for g in exp.groups for v in g] + exp.terms
     std_q, _ = detect_standard(query.upper())
     wants_value = bool(VALUE_WORDS.search(query))
-    rows, and_ids, mode = _keyword(con, exp, k, cfg, s)
+    keep_docs = _allowed_docs(con, types, tiers, year_min, discipline, exclude_flagged)
+    allowed = _allowed_chunks(con, keep_docs)       # the keyword channel filters before its cut (audit item 16)
+    rows, and_ids, mode = _keyword(con, exp, k, cfg, s, allowed)
     or_mode = mode.startswith("and+or")  # before any channel note joins the mode string (review finding 1)
     vec: list[tuple[int, float]] = []
     if hybrid and cfg is not None and (getattr(cfg, "embeddings", None) or {}).get("enabled"):
@@ -389,9 +432,11 @@ def _candidates(con, query: str, k: int, types, tiers, year_min, discipline, exc
     and_docs: set[int] = set()
     for cr in chunk_rows:
         did = cr["doc_id"]
-        if not include_duplicates and did in dup_of:
+        if not include_duplicates and did in dup_of and (keep_docs is None or dup_of[did] in keep_docs):
             # near-duplicate: its canonical copy carries (almost) the same text and is
-            # cited instead; never re-map chunks to another file (locators would be wrong)
+            # cited instead; never re-map chunks to another file (locators would be wrong).
+            # A copy whose canonical the filter drops stands in for it, or the filter finds
+            # neither; the copy carries the canonical's marking (G2.5, effective_flag below).
             continue
         cid = cr["chunk_id"]
         sc = raw[cid]

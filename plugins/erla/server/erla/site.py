@@ -207,6 +207,12 @@ def _validate_roots(roots: list[str | Path], site: Path) -> list[Path]:
         if s in p.parents:
             raise SiteError(f"library folder {p} is inside the ERLA site folder {site}; "
                             f"the library and ERLA's working folder must not overlap (G1.1)")
+        nested = next((q for q in out if q != p and (q in p.parents or p in q.parents)), None)
+        if nested is not None:
+            # one root inside another listed every file under both: the index run failed on the duplicate path
+            # (correctness audit 2026-10-31)
+            raise SiteError(f"library folders {nested} and {p} overlap (one is inside the other): list only the "
+                            "outer folder")
         if p not in out:
             out.append(p)
     if not out:

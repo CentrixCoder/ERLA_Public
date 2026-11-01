@@ -87,7 +87,10 @@ def _log(msg: str, echo: bool) -> None:
     with open(LOG, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
     if echo:
-        print(line, flush=True)
+        # /erla:setup pipes stdout in the console code page (cp1252): a runtime path under a Cyrillic or CJK user
+        # name raised UnicodeEncodeError and aborted the install (correctness audit 2026-10-31)
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(line.encode(enc, "replace").decode(enc, "replace"), flush=True)
 
 
 RECONNECT = ("A session that started during the install switches to it by itself; if ERLA's library tools "

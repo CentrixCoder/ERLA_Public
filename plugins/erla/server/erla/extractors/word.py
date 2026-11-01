@@ -27,7 +27,7 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]  (python-d
 
 from .base import Chunk, Extractor, ExtractResult, clean, rows_to_markdown, split_long
 
-VERSION = "docx-2"
+VERSION = "docx-3"     # audit 2026-10-31: rows and cells inside content controls
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
@@ -522,8 +522,28 @@ class DocxExtractor(Extractor):
                 parts.append(" ".join(x for x in (label, w.para_text(el)) if x))
             return " ".join(x for x in parts if x)
 
+        def unwrap_rows_and_cells(tbl: Any) -> None:
+            """Lift rows and cells out of content controls (w:sdt, Word's repeating sections) and custom XML
+            wrappers, in this in-memory copy of the document (the file is never written). Both lookups below see
+            direct children only, so wrapped rows and cells were dropped with no warning (correctness audit
+            2026-10-31)."""
+            parents = (_w("tbl"), _w("tr"))
+            while True:
+                wrap = next((el for el in tbl.iter(_w("sdt"), _w("customXml"))
+                             if el.getparent() is not None and el.getparent().tag in parents), None)
+                if wrap is None:
+                    return
+                parent = wrap.getparent()
+                body = wrap.find(_w("sdtContent")) if wrap.tag == _w("sdt") else wrap
+                kids = [k for k in (body if body is not None else []) if k.tag != _w("customXmlPr")]
+                at = parent.index(wrap)
+                parent.remove(wrap)
+                for k, kid in enumerate(kids):
+                    parent.insert(at + k, kid)
+
         def read_table(tbl: Any, loc: str) -> list[tuple[str, str, dict[str, Any]]]:
             """(locator, markdown, flags) of a table and the tables nested in it."""
+            unwrap_rows_and_cells(tbl)
             nested: list[Any] = []
             # each cell read once, in document order (numbering counts); merged cells repeat its text
             texts = {tc: cell_text(tc, nested) for tr in tbl.findall(_w("tr")) for tc in tr.findall(_w("tc"))}

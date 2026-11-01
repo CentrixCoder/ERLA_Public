@@ -52,16 +52,66 @@ class IndexStats:
         return d
 
 
-def iter_library(cfg: Config):
-    """Yield (abs_path, rel_path, root) for every indexable file."""
+def _real(path: str) -> str:
+    try:
+        return os.path.normcase(os.path.realpath(path))
+    except OSError:
+        return os.path.normcase(os.path.abspath(path))
+
+
+def iter_library(cfg: Config, errors: list[str] | None = None):
+    """Yield (abs_path, rel_path, root) for every indexable file, each file once.
+
+    Folders that cannot be listed are appended to ``errors`` (when given): a caller that removes index
+    records for files it did not see must not remove those under an unreadable folder (a share that dropped
+    for a moment must not delete its OCR text and vectors). A file under two configured roots (one root
+    inside another) is yielded once, under the first root. A junction (which os.walk follows on Windows) is
+    followed, but no real folder is walked twice: a junction back to its own root looped (correctness audit 2026-10-31: 128 paths for 2
+    files)."""
+    seen: set[str] = set()
+    walked: set[str] = set()
+
+    def failed(exc: OSError) -> None:
+        if errors is not None:
+            errors.append(str(exc.filename or exc))
+
     for root in cfg.library_roots:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")]
+        for dirpath, dirnames, filenames in os.walk(root, onerror=failed):
+            here = _real(dirpath)
+            if here in walked:
+                dirnames[:] = []
+                continue
+            walked.add(here)
+            dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")
+                           and _real(os.path.join(dirpath, d)) not in walked]
             for fn in filenames:
                 p = Path(dirpath) / fn
                 if not cfg.is_included(p):
                     continue
+                key = os.path.normcase(str(p))
+                if key in seen:
+                    continue
+                seen.add(key)
                 yield p, p.relative_to(root).as_posix(), root
+
+
+def _storable(p: Path) -> bool:
+    """A file name the index can store: a lone surrogate (an invalid UTF-16 name on Windows) cannot be
+    written as UTF-8 and aborted the whole run (correctness audit 2026-10-31)."""
+    try:
+        str(p).encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def orphan_ids(con) -> set[int]:
+    """'duplicate' records whose original is gone: they hold no text, so their content is not searchable
+    until they are read again."""
+    live = {r[0] for r in con.execute("SELECT doc_id FROM documents")}
+    valid = {d for d, c in con.execute("SELECT doc_id, canonical_doc_id FROM duplicates") if c in live and d in live}
+    return {r[0] for r in con.execute("SELECT doc_id FROM documents WHERE extract_status='duplicate'")
+            if r[0] not in valid}
 
 
 XVER_SQL = "CASE WHEN json_valid(meta_json) THEN json_extract(meta_json, '$.extractor') END"
@@ -95,6 +145,8 @@ def probe_library(cfg: Config, con) -> dict:
     seen: set[str] = set()
     max_b = cfg.max_file_mb * 1024 * 1024
     for p, rel, _root in iter_library(cfg):
+        if not _storable(p):
+            continue
         try:
             s = p.stat()
         except OSError:
@@ -128,6 +180,9 @@ def probe_library(cfg: Config, con) -> dict:
         reasons.append(f"{missing} indexed file(s) no longer on disk")
     if outdated:
         reasons.append(f"{outdated} indexed file(s) read by an older extractor")
+    orphaned = len(orphan_ids(con))
+    if orphaned:
+        reasons.append(f"{orphaned} duplicate record(s) without their original (text not searchable)")
     if last_ts and newest_m and newest_m > last_ts.timestamp():
         reasons.append("library modified after last full index")
     return {"last_index_at": last, "age_days": age, "stale_days": cfg.stale_days,
@@ -180,6 +235,53 @@ def _extract_job(path_str: str, ext: str, cfg: Config, ocr_now: bool, progress=N
         return ExtractResult(status="failed", error=f"{type(exc).__name__}: {exc}")
 
 
+def doc_title(meta: dict, path: Path) -> str:
+    """The title a document is written with (documents.title is its first 400 characters)."""
+    return str(meta.get("title") or meta.get("title_guess") or path.stem)
+
+
+@dataclass
+class Prepared:
+    """The pure-CPU part of writing one document, computed from its ExtractResult alone (S11, L12).
+
+    The writer used to compute all of it in the single main process (simhash, chunk units, FTS text
+    normalisation, reference scan), so extra workers bought nothing. Pool workers now compute it beside
+    extraction; every other path (one worker, cache hits, Office COM, deferred OCR) computes it in the
+    writer with the same function, so every path writes the same rows."""
+    fts_version: int
+    simhash: str | None
+    units: list[str]
+    fts_bodies: list[str]
+    refs: dict[str, dict] | None           # None: not scanned (the index has no refs table)
+
+    def fits(self, res: ExtractResult, fts_version: int, with_refs: bool) -> bool:
+        """True when this was prepared for `res` under the writer's current index layout."""
+        n = len(res.chunks)
+        return (self.fts_version == fts_version and len(self.units) == n and len(self.fts_bodies) == n
+                and (self.refs is not None or not with_refs))
+
+
+def prepare(res: ExtractResult, fts_version: int, ref_rules: dict, with_refs: bool = True) -> Prepared:
+    """Prepared for one extracted document. Pure: reads nothing but its arguments (worker-safe)."""
+    texts = [ch.text for ch in res.chunks]
+    return Prepared(fts_version=fts_version,
+                    simhash=simhash(res.text) if res.chunks else None,
+                    units=[ch.units for ch in res.chunks],
+                    fts_bodies=[store.fts_body(fts_version, t) for t in texts],
+                    refs=refs.extract(texts, ref_rules) if with_refs else None)
+
+
+def _extract_prepare_job(path_str: str, ext: str, cfg: Config, ocr_now: bool, fts_version: int,
+                         ref_rules: dict, with_refs: bool = True) -> tuple[ExtractResult, Prepared | None]:
+    """Worker job: extract one file, then prepare its rows. A failed prepare returns None, so the writer
+    computes it (and meets the same error there, as before S11)."""
+    res = _extract_job(path_str, ext, cfg, ocr_now)
+    try:
+        return res, prepare(res, fts_version, ref_rules, with_refs)
+    except Exception:
+        return res, None
+
+
 class Indexer:
     def __init__(self, cfg: Config, log=print, heartbeat=None):
         self.cfg = cfg
@@ -191,8 +293,12 @@ class Indexer:
 
     # ------------------------------------------------------------ writing
     def _write(self, path: Path, rel: str, size: int, mtime: float, sha: str,
-               res: ExtractResult, doc_id: int | None) -> int:
+               res: ExtractResult, doc_id: int | None, prep: Prepared | None = None) -> int:
         con = self.con
+        fv = store.fts_version(con)
+        with_refs = store.has_table(con, "refs")
+        if prep is None or not prep.fits(res, fv, with_refs):
+            prep = prepare(res, fv, self._ref_rules, with_refs)
         copies: list[int] = []
         added = self._added_at(doc_id)
         if doc_id is not None:
@@ -208,14 +314,14 @@ class Indexer:
         if getattr(EXTRACTORS.get(ext), "version", ""):
             # a read that skipped Office for this run only stays outdated, so the next run reads it again
             meta["extractor"] = EXTRACTORS[ext].version + ("+pending" if meta.get("com_skipped") else "")
-        title = meta.get("title") or meta.get("title_guess") or path.stem
+        title = doc_title(meta, path)
         head = "\n".join(c.text for c in res.chunks[:2])
         tail = "\n".join(c.text for c in res.chunks[-2:]) if len(res.chunks) > 2 else ""
         flag = self.cfg.path_flag(rel) or detect_markings(head, tail)
         std, rev = detect_standard(f"{path.name}\n{title}\n{head[:3000]}")
         year = meta.get("year") or guess_year(path.name, title, head[:2000])
         cls = classify_document(rel, ext, title, head)
-        sh = simhash(res.text) if res.chunks else None
+        sh = prep.simhash
         cur = con.execute(
             """INSERT INTO documents(path, rel_path, sha256, simhash, size, mtime, ext, title, authors, year,
                    doc_type, discipline, standard_id, revision, authority_tier, classification_flag, top_folder,
@@ -229,17 +335,16 @@ class Indexer:
         new_id = cur.lastrowid
         con.executemany("INSERT OR REPLACE INTO duplicates(doc_id, canonical_doc_id, kind) VALUES (?,?,'exact')",
                         [(c, new_id) for c in copies])
-        fv = store.fts_version(con)
         fts_rows: list[tuple[int, str | None]] = []
         for seq, ch in enumerate(res.chunks):
             c = con.execute("INSERT INTO chunks(doc_id, seq, locator, text, units_detected, has_table, quality_json) "
                             "VALUES (?,?,?,?,?,?,?)",
-                            (new_id, seq, ch.locator, ch.text, ch.units, int(ch.has_table),
+                            (new_id, seq, ch.locator, ch.text, prep.units[seq], int(ch.has_table),
                              json.dumps(ch.quality) if ch.quality else None))
             fts_rows.append((int(c.lastrowid or 0), ch.text))
-        store.fts_insert(con, fts_rows, str(title), str(path), rel, fv)
+        store.fts_insert(con, fts_rows, str(title), str(path), rel, fv, bodies=prep.fts_bodies)
         refs.record_document(con, int(new_id or 0), [ch.text for ch in res.chunks], std,   # Phase 4.4
-                             self._ref_rules)
+                             self._ref_rules, found=prep.refs)
         if any(ch.has_table and "|" in ch.text for ch in res.chunks):
             props.extract_document(con, new_id)                       # A3
         if ext == "pdf" and res.status == "ok":
@@ -348,20 +453,22 @@ class Indexer:
         seen_paths: set[str] = set()
         todo: list[tuple[Path, str, int, float, str, int | None]] = []
         dup_items: list[tuple[Path, str, int, float, str, int, int | None]] = []
-        # Orphans: 'duplicate' records whose canonical no longer exists (left by the pre-0.1.5 move bug).
-        live_ids = {r["doc_id"] for r in existing.values()}
-        valid_dups = {d for d, c in con.execute("SELECT doc_id, canonical_doc_id FROM duplicates")
-                      if c in live_ids and d in live_ids}
-        orphans = {r["doc_id"] for r in existing.values()
-                   if r["extract_status"] == "duplicate" and r["doc_id"] not in valid_dups}
+        # Orphans: 'duplicate' records whose canonical no longer exists (the pre-0.1.5 move bug; until the
+        # 2026-10-31 audit also an edited original, or two copies that swapped names)
+        orphans = orphan_ids(con)
+        unreadable: list[str] = []
 
         legacy_on = bool(self.cfg.legacy_office.get("enabled", True))
-        for p, rel, _root in iter_library(self.cfg):
+        for p, rel, _root in iter_library(self.cfg, unreadable):
             if subpath and not rel.lower().startswith(subpath.lower().strip("/\\").replace("\\", "/")):
                 seen_paths.add(str(p))
                 continue
             st.seen += 1
             seen_paths.add(str(p))
+            if not _storable(p):
+                st.failed += 1
+                st.failures.append(f"{ascii(rel)}: the file name cannot be stored (invalid characters): rename it")
+                continue
             try:
                 s = p.stat()
             except OSError as exc:
@@ -425,29 +532,40 @@ class Indexer:
         done = 0
         cexts = xcache.cache_exts(self.cfg)
 
-        def handle(item, res: ExtractResult, cached: bool = False):
+        def handle(item, res: ExtractResult, cached: bool = False, prep: Prepared | None = None):
             nonlocal done
             p, rel, size, mtime, sha, doc_id = item
             ext = p.suffix.lower().lstrip(".")
-            if not cached and ext in cexts:
-                xcache.put(con, sha, ext, res)
-            if sha in by_sha and by_sha[sha] != doc_id:      # duplicate found within this run
-                self._write_duplicate(p, rel, size, mtime, sha, by_sha[sha], doc_id)
-                st.duplicates += 1
-            else:
-                new_id = self._write(p, rel, size, mtime, sha, res, doc_id)
-                by_sha[sha] = new_id
-                if doc_id is None:
-                    st.new += 1
+            # one file's rows in a savepoint: an error writing it (a name or text SQLite cannot take) rolls back
+            # that file only, is reported, and the run goes on (correctness audit 2026-10-31: one bad file
+            # aborted every run, so no file after it was ever indexed)
+            con.execute("SAVEPOINT erla_file")
+            try:
+                if not cached and ext in cexts:
+                    xcache.put(con, sha, ext, res)
+                if sha in by_sha and by_sha[sha] != doc_id:      # duplicate found within this run
+                    self._write_duplicate(p, rel, size, mtime, sha, by_sha[sha], doc_id)
+                    st.duplicates += 1
                 else:
-                    st.updated += 1
-                st.ocr_used += int(res.ocr_used)
-                st.ocr_pending += int(res.ocr_pending)
-                if res.status == "empty":
-                    st.empty += 1
-                elif res.status == "failed":
-                    st.failed += 1
-                    st.failures.append(f"{rel}: {res.error}")
+                    new_id = self._write(p, rel, size, mtime, sha, res, doc_id, prep)
+                    by_sha[sha] = new_id
+                    if doc_id is None:
+                        st.new += 1
+                    else:
+                        st.updated += 1
+                    st.ocr_used += int(res.ocr_used)
+                    st.ocr_pending += int(res.ocr_pending)
+                    if res.status == "empty":
+                        st.empty += 1
+                    elif res.status == "failed":
+                        st.failed += 1
+                        st.failures.append(f"{rel}: {res.error}")
+                con.execute("RELEASE erla_file")
+            except Exception as exc:
+                con.execute("ROLLBACK TO erla_file")
+                con.execute("RELEASE erla_file")
+                st.failed += 1
+                st.failures.append(f"{ascii(rel)}: write {type(exc).__name__}: {exc}")
             done += 1
             self.heartbeat()
             if done % 25 == 0:
@@ -478,29 +596,60 @@ class Indexer:
                 for item in pool_items:
                     handle(item, _extract_job(str(item[0]), item[0].suffix.lower().lstrip("."), self.cfg, ocr))
             else:
+                # S11: the workers also prepare each document's rows (simhash, units, FTS text, references),
+                # so the writer is left with the SQL
+                fv, with_refs = store.fts_version(con), store.has_table(con, "refs")
                 with ProcessPoolExecutor(max_workers=workers) as ex:
-                    futs = {ex.submit(_extract_job, str(it[0]), it[0].suffix.lower().lstrip("."), self.cfg, ocr): it
+                    futs = {ex.submit(_extract_prepare_job, str(it[0]), it[0].suffix.lower().lstrip("."), self.cfg,
+                                      ocr, fv, self._ref_rules, with_refs): it
                             for it in pool_items}
                     for fut in as_completed(futs):
-                        item = futs[fut]
+                        item = futs.pop(fut)        # frees each result once written, not at the end of the run
+                        prep: Prepared | None = None
                         try:
-                            res = fut.result()
+                            res, prep = fut.result()
                         except Exception as exc:
                             res = ExtractResult(status="failed", error=f"worker: {exc}")
-                        handle(item, res)
+                        handle(item, res, prep=prep)
         for item in com_items:
             handle(item, self._com_extract(item[0], item[0].suffix.lower().lstrip(".")))
+        # ------------------------------------------------ copies left without their original
+        # An original re-read with new content, or turned into a copy of another file (two files that swapped
+        # names), takes its exact copies' link with it: their records hold no text. Read them again in this
+        # run, so the probe never reports an index CURRENT whose copies cannot be found (audit 2026-10-31).
+        repair: list[tuple[Path, str, int, float, str, int | None]] = []
+        for did in sorted(orphan_ids(con)):
+            r = con.execute("SELECT path, rel_path, size, mtime, sha256 FROM documents WHERE doc_id=?", (did,)).fetchone()
+            if r is not None and r["path"] in seen_paths and Path(r["path"]).is_file():
+                repair.append((Path(r["path"]), r["rel_path"], r["size"], r["mtime"], r["sha256"], did))
+        if repair:
+            by_sha.clear()
+            by_sha.update({r[0]: r[1] for r in con.execute(
+                "SELECT sha256, doc_id FROM documents WHERE sha256 IS NOT NULL AND extract_status != 'duplicate'")})
+            for item in repair:
+                ext = item[0].suffix.lower().lstrip(".")
+                handle(item, self._com_extract(item[0], ext) if ext in COM_EXTS
+                       else _extract_job(str(item[0]), ext, self.cfg, ocr))
+                st.repaired += 1
+            self.log(f"  {len(repair)} copies read again: their original changed in this run")
         for w in self._com.values():
             w.close()
         self._com.clear()
         con.commit()
 
         # ------------------------------------------------ removed files
+        if unreadable:
+            st.failed += len(unreadable)
+            st.failures += [f"{u}: folder could not be listed: its index records are kept" for u in unreadable[:20]]
+            self.log(f"  {len(unreadable)} folder(s) could not be listed; their records are kept, not removed")
+        blocked = [os.path.normcase(os.path.join(u, "")) for u in unreadable]
         if not limit:
             for path, row in existing.items():
                 did = row["doc_id"]
                 if path in seen_paths or did in relocated:
                     continue
+                if any(os.path.normcase(path).startswith(b) for b in blocked):
+                    continue                    # not seen because its folder could not be listed: not deleted
                 # Original deleted but an exact copy survives: promote the copy into the canonical record
                 # so the content stays searchable (the copy's own record holds no text).
                 heir = next((h for h in con.execute(
@@ -521,7 +670,7 @@ class Indexer:
         # P4: last_index_at certifies a COMPLETE scan of every root; partial runs (--limit/--path)
         # are recorded separately so they can never make a partly indexed library look fresh.
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if limit or subpath:
+        if limit or subpath or unreadable:             # a folder not listed: the scan was not complete
             store.set_meta(con, "last_partial_index_at", now)
         else:
             store.set_meta(con, "last_index_at", now)
