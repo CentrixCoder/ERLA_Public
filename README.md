@@ -3,6 +3,7 @@
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.7.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](#status)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
@@ -235,6 +236,20 @@ Next time, `/erla`, then **Open KPI dashboard ↗**. On the same card, **Copy li
 address ships with ERLA: each person's link is their own. Like the rest of the panel, the card shows only
 in a Claude Code session (desktop app **Code** tab or terminal), not in a claude.ai chat.
 <!-- public:end kpi-dashboard -->
+
+<!-- public:begin status -->
+## Status
+
+**Beta.** ERLA is tested, released through automated gates, and checks every cited value against its
+source in code (`verify_packet`) before a Result Packet reaches you. It is not yet production grade:
+
+- Search quality is measured on a small golden set from one library, mostly exact value lookups, and no
+  search evaluation gates a release yet.
+- Each tool call is logged, but there is no per-request trace, no latency or cost record and no health
+  alert.
+
+Check a value against its cited source before you rely on it.
+<!-- public:end status -->
 
 ## About this repository
 
