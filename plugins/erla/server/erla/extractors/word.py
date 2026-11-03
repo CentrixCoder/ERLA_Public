@@ -27,7 +27,8 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]  (python-d
 
 from .base import Chunk, Extractor, ExtractResult, clean, rows_to_markdown, split_long
 
-VERSION = "docx-3"     # audit 2026-10-31: rows and cells inside content controls
+VERSION = "docx-4"     # production loop 2026-11-02: cells after a w:gridBefore offset stay in their columns
+#                        (docx-3, audit 2026-10-31: rows and cells inside content controls)
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
@@ -548,7 +549,10 @@ class DocxExtractor(Extractor):
             # each cell read once, in document order (numbering counts); merged cells repeat its text
             texts = {tc: cell_text(tc, nested) for tr in tbl.findall(_w("tr")) for tc in tr.findall(_w("tc"))}
             try:
-                rows = [[texts.get(c._tc, "") for c in row.cells] for row in Table(tbl, d._body).rows]
+                # a row that starts late (w:gridBefore) has no cells for the skipped grid columns: blank them,
+                # so its cells stay under their headings (production loop F-29)
+                rows = [[""] * (row.grid_cols_before or 0) + [texts.get(c._tc, "") for c in row.cells]
+                        for row in Table(tbl, d._body).rows]
             except Exception:
                 rows = []
             md = rows_to_markdown(rows)

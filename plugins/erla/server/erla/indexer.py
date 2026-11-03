@@ -9,20 +9,22 @@ from __future__ import annotations
 import json
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections import deque
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import props, refs, safeio, store, tables, xcache
-from .classify import (classify_document, copy_group_flags, detect_markings, detect_standard, guess_year,
-                       most_restrictive)
+from .classify import (UNKNOWN, classify_document, copy_group_flags, detect_markings, detect_standard, guess_year,
+                       most_restrictive, unread_flag)
 from .config import Config
 from .dedupe import near_duplicate_pairs, sha256_file, simhash
 from .extractors import COM_EXTS, EXTRACTORS, ExtractResult
 from .extractors.legacy import ComWorker
 
 SKIP_DIRS = {"__pycache__", ".git", ".svn", "$recycle.bin", "system volume information"}
+WINDOW_PER_WORKER = 4      # extraction jobs in flight per worker while results are written in scan order
 
 
 @dataclass
@@ -59,6 +61,16 @@ def _real(path: str) -> str:
         return os.path.normcase(os.path.abspath(path))
 
 
+def _listing_order(name: str) -> tuple[str, str]:
+    """The order NTFS lists a folder in (names compared upper-cased), applied on every OS.
+
+    New files get their doc_id, and the first of two identical copies becomes the canonical one, in the order
+    they are found. os.walk gives NTFS's sorted order on Windows but the file system's own order elsewhere (ext4:
+    hash order), so on Linux CI the same library got other doc_ids and canonical copies, and 31 of the eval
+    golden questions other ranked hits (F-04)."""
+    return name.upper(), name
+
+
 def iter_library(cfg: Config, errors: list[str] | None = None):
     """Yield (abs_path, rel_path, root) for every indexable file, each file once.
 
@@ -82,9 +94,9 @@ def iter_library(cfg: Config, errors: list[str] | None = None):
                 dirnames[:] = []
                 continue
             walked.add(here)
-            dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")
-                           and _real(os.path.join(dirpath, d)) not in walked]
-            for fn in filenames:
+            dirnames[:] = sorted((d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")
+                                  and _real(os.path.join(dirpath, d)) not in walked), key=_listing_order)
+            for fn in sorted(filenames, key=_listing_order):
                 p = Path(dirpath) / fn
                 if not cfg.is_included(p):
                     continue
@@ -317,7 +329,10 @@ class Indexer:
         title = doc_title(meta, path)
         head = "\n".join(c.text for c in res.chunks[:2])
         tail = "\n".join(c.text for c in res.chunks[-2:]) if len(res.chunks) > 2 else ""
-        flag = self.cfg.path_flag(rel) or detect_markings(head, tail)
+        # F-37: no text to read a marking from (image-only, OCR pending or off, empty, failed) -> UNKNOWN, local
+        # only; the OCR pass rewrites the document through here, so its text then decides
+        flag = unread_flag(self.cfg.path_flag(rel) or detect_markings(head, tail),
+                           any(c.text.strip() for c in res.chunks), res.ocr_pending)
         std, rev = detect_standard(f"{path.name}\n{title}\n{head[:3000]}")
         year = meta.get("year") or guess_year(path.name, title, head[:2000])
         cls = classify_document(rel, ext, title, head)
@@ -335,6 +350,10 @@ class Indexer:
         new_id = cur.lastrowid
         con.executemany("INSERT OR REPLACE INTO duplicates(doc_id, canonical_doc_id, kind) VALUES (?,?,'exact')",
                         [(c, new_id) for c in copies])
+        # F-37: exact copies took this document's UNKNOWN while it was unread; its text decides theirs too (a real
+        # flag on a copy is never touched, and reconcile_copy_flags then raises the group as before)
+        con.executemany("UPDATE documents SET classification_flag=? WHERE doc_id=? AND classification_flag=?",
+                        [(flag, c, UNKNOWN) for c in copies])
         fts_rows: list[tuple[int, str | None]] = []
         for seq, ch in enumerate(res.chunks):
             c = con.execute("INSERT INTO chunks(doc_id, seq, locator, text, units_detected, has_table, quality_json) "
@@ -599,17 +618,45 @@ class Indexer:
                 # S11: the workers also prepare each document's rows (simhash, units, FTS text, references),
                 # so the writer is left with the SQL
                 fv, with_refs = store.fts_version(con), store.has_table(con, "refs")
+                # Every file is written in scan order, as one worker writes them: a new file's doc_id is taken when
+                # its row is written and breaks ranking ties, and the first of identical files is their original.
+                # Results arrive in completion order, so following it gave the same library another original and
+                # other doc_ids from run to run (production loop 2026-11-02, both seen under load). Only the first
+                # of identical files is read; a bounded window of jobs in flight keeps the pool busy and holds at
+                # most WINDOW_PER_WORKER * workers results in memory while an earlier file is still being read.
+                first: dict[str, tuple[Path, str, int, float, str, int | None]] = {}
+                for it in pool_items:
+                    if it[4] not in first and not (it[4] in by_sha and by_sha[it[4]] != it[5]):
+                        first[it[4]] = it
                 with ProcessPoolExecutor(max_workers=workers) as ex:
-                    futs = {ex.submit(_extract_prepare_job, str(it[0]), it[0].suffix.lower().lstrip("."), self.cfg,
-                                      ocr, fv, self._ref_rules, with_refs): it
-                            for it in pool_items}
-                    for fut in as_completed(futs):
-                        item = futs.pop(fut)        # frees each result once written, not at the end of the run
+                    queue = iter(first.values())
+                    flight: deque[tuple[Future[tuple[ExtractResult, Prepared | None]],
+                                        tuple[Path, str, int, float, str, int | None]]] = deque()
+
+                    def submit_next() -> None:
+                        it = next(queue, None)
+                        if it is not None:
+                            flight.append((ex.submit(_extract_prepare_job, str(it[0]),
+                                                     it[0].suffix.lower().lstrip("."), self.cfg, ocr, fv,
+                                                     self._ref_rules, with_refs), it))
+                    for _ in range(WINDOW_PER_WORKER * workers):
+                        submit_next()
+                    for item in pool_items:
+                        if first.get(item[4]) is not item:   # a copy: its original was written before it
+                            if item[4] in by_sha:
+                                handle(item, ExtractResult(status="duplicate"), cached=True)
+                            else:                # its original's row was rolled back: read this one in its place
+                                handle(item, _extract_job(str(item[0]), item[0].suffix.lower().lstrip("."),
+                                                          self.cfg, ocr))
+                            continue
+                        fut, _ = flight.popleft()    # the first in flight is this file: submitted in this order
                         prep: Prepared | None = None
                         try:
                             res, prep = fut.result()
                         except Exception as exc:
                             res = ExtractResult(status="failed", error=f"worker: {exc}")
+                        del fut                      # frees each result once written, not at the end of the run
+                        submit_next()
                         handle(item, res, prep=prep)
         for item in com_items:
             handle(item, self._com_extract(item[0], item[0].suffix.lower().lstrip(".")))

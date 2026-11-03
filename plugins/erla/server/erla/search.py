@@ -389,6 +389,23 @@ def _candidates(con, query: str, k: int, types, tiers, year_min, discipline, exc
             sp = sparse.search(cfg, con, query)
         except Exception as exc:                       # model missing / offline: keep the other channels
             mode += f"+sparse_failed({type(exc).__name__})"
+    if allowed is not None and not rows and (vec or sp):
+        import numpy as np
+        if not np.isin([c for c, _ in vec + sp], allowed).any():
+            # The filter left no candidate at all: only then do the vector and sparse channels filter before
+            # their 600-chunk cut (F-35). A filtered query that keeps any candidate ranks as before (filtering
+            # first on every filtered query ranked 21 filter cases worse, docs/evals/README.md).
+            mode += "+filter_first"
+            if vec:
+                from . import embed
+                vec = embed.vector_search(cfg, query, allowed=allowed)
+            if sp:
+                from . import sparse
+                try:
+                    sp = sparse.search(cfg, con, query, allowed=allowed)
+                except Exception as exc:               # as above: keep the other channels
+                    sp = []
+                    mode += f"+sparse_failed({type(exc).__name__})"
     if not rows and not vec and not sp:
         return _Cands([], exp, mode, words, {}, {}, set())
 

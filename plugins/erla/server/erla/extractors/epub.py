@@ -250,6 +250,7 @@ class _Content(HTMLParser):
         self.pre: list[str] | None = None
         self.table: _Table | None = None
         self.pending: list[str] = []      # page anchors met inside a table or code block
+        self.in_word: list[str] = []      # page anchors met inside a word, released where the word ends
         self.sups: list[tuple[list[str], int, bool]] = []    # open <sup>: its text list, start, holds a link
 
     def _flush(self, keep_kind: bool = False) -> None:
@@ -261,13 +262,32 @@ class _Content(HTMLParser):
         self.buf.clear()
         if not keep_kind:
             self.kind = "p"
+        for ident in self.in_word:             # a block boundary ends the word
+            self.events.append(("page", ident))
+        self.in_word.clear()
 
     def _anchor(self, ident: str) -> None:
         if self.table is not None or self.pre is not None:
             self.pending.append(ident)         # a page break inside a table or code block: the block
             return                             # stays whole on the page it starts on
+        raw = "".join(self.buf).translate(INVISIBLE)
+        if raw and not raw[-1].isspace():
+            self.in_word.append(ident)         # a page break inside a word ('6<pagebreak/>4'): the word stays
+            return                             # whole on the page it starts on (production loop F-27)
         self._flush(keep_kind=True)
         self.events.append(("page", ident))
+
+    def _text(self, data: str) -> None:
+        """Paragraph text; a page break waiting for the end of its word is released at the first space."""
+        if self.in_word:
+            m = re.search(r"\s", data)
+            if m is None:
+                self.buf.append(data)
+                return
+            self.buf.append(data[:m.start()])
+            self._flush(keep_kind=True)
+            data = data[m.start():]
+        self.buf.append(data)
 
     def _release(self) -> None:
         for ident in self.pending:
@@ -330,7 +350,7 @@ class _Content(HTMLParser):
             self._flush()
             self.table = _Table()
         elif tag == "br":
-            self.buf.append("\n")
+            self._text("\n")
         elif tag in BLOCK:
             inherit = self.kind == "li" and tag in ("p", "div") and not "".join(self.buf).strip()
             self._flush(keep_kind=inherit)         # <li><p>text</p></li> stays a list item
@@ -375,7 +395,7 @@ class _Content(HTMLParser):
         elif self.pre is not None:
             self.pre.append(data)
         else:
-            self.buf.append(data)
+            self._text(data)
 
     def finish(self) -> list[tuple[str, str]]:
         self.close()
@@ -580,7 +600,9 @@ class _Chunks:
 
 class EpubExtractor(Extractor):
     exts = ("epub",)
-    version = "epub-2"            # audit 2026-10-31: superscripts read as exponents or note marks
+    version = "epub-3"            # production loop 2026-11-02: lost page-list anchors warned, page-list paths
+    #                               matched case-insensitively, a page break inside a word keeps the word whole
+    #                               (epub-2, audit 2026-10-31: superscripts read as exponents or note marks)
 
     def extract(self, path: Path) -> ExtractResult:
         try:
@@ -604,13 +626,19 @@ class EpubExtractor(Extractor):
             res.meta["drm"] = True
             return res
         targets, source = pkg.page_targets()
+
+        def key(path: str) -> str:
+            """Page-list and manifest paths meet as archive members, matched as the package matches them
+            (case-insensitively when not exact): 'chapter1.xhtml#p5' reaches Chapter1.xhtml (production loop F-26)."""
+            return pkg.member(path) or path
+
         anchors: dict[str, dict[str, str]] = {}
         starts: dict[str, str] = {}
         for p, frag, label in targets:
             if frag:
-                anchors.setdefault(p, {}).setdefault(frag, label)
+                anchors.setdefault(key(p), {}).setdefault(frag, label)
             else:
-                starts.setdefault(p, label)
+                starts.setdefault(key(p), label)
         covered = set(anchors) | set(starts)
         res.meta.update({"spine_items": len(items), "page_list": len(targets) or None,
                          "page_count": len(targets) or None,
@@ -647,22 +675,36 @@ class EpubExtractor(Extractor):
                 out.quality, out.loc, page = None, "", None
                 continue
             read += 1
-            if ipath not in covered:
+            ikey = key(ipath)
+            if ikey not in covered:
                 page = None                               # the page-list does not reach this item:
-            if ipath in starts:                           # never carry a printed page into it
-                page = starts[ipath]
+            if ikey in starts:                            # never carry a printed page into it
+                page = starts[ikey]
                 out.start(f"p.{page}")
             elif page is None:
                 out.start(f"item {n}")
-            quality: dict[str, object] | None = {"warnings": [f"EPUB spine item {n}: {warn}"]} if warn else None
+            item_anchors = anchors.get(ikey, {})
+            parser = _Content(set(item_anchors))
+            parser.feed(text)
+            events = parser.finish()
+            warnings = [f"EPUB spine item {n}: {warn}"] if warn else []
+            met = {value for kind, value in events if kind == "page"}
+            lost = [label for frag, label in item_anchors.items() if frag not in met]
+            if lost:
+                # the page-list names an anchor no element of this item carries: that page's text is stored
+                # under the page before it, so its locator is wrong (production loop F-25)
+                msg = (f"EPUB spine item {n} ({ipath}): page-list target(s) "
+                       f"{', '.join(f'p.{lab}' for lab in lost[:20])} not found in the text; the text of "
+                       "those printed pages is stored under the page before them - check the page in the book")
+                warnings.append(msg)
+                problems.append(msg)
+            quality: dict[str, object] | None = {"warnings": warnings} if warnings else None
             if quality != out.quality:                    # the warning travels with this item's text only
                 out.flush()
                 out.quality = quality
-            parser = _Content(set(anchors.get(ipath, {})))
-            parser.feed(text)
-            for kind, value in parser.finish():
+            for kind, value in events:
                 if kind == "page":
-                    page = anchors[ipath][value]
+                    page = item_anchors[value]
                     out.start(f"p.{page}")
                 elif kind in HEADINGS:
                     if page is None:

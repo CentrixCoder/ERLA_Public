@@ -11,7 +11,7 @@ install; once the runtime stamp says this version and no install holds the lock,
 the real server, replays the client's ``initialize`` to it, forwards every later message both
 ways, and tells the client that its tools, resources and prompts changed. No reconnect.
 
-Args: <install.log> <version> <python>
+Args: <install.log> <version> <python> [--build <server files hash>]
       [--handoff <installed.json> <install.lock> <MCP_MODE.md> -- <real server command...>]
 """
 
@@ -44,7 +44,14 @@ def _handoff_args(argv: list[str]) -> tuple[Path, Path, Path, list[str]] | None:
     return Path(stamp), Path(lock), Path(instructions), argv[j + 1:]
 
 
+def _build_arg(argv: list[str]) -> str | None:
+    """``--build <hash>`` (F-32): the server files' hash the stamp must also show before the hand-off."""
+    head = argv[:argv.index("--")] if "--" in argv else argv
+    return head[head.index("--build") + 1] if "--build" in head[:-1] else None
+
+
 HANDOFF = _handoff_args(sys.argv)
+BUILD = _build_arg(sys.argv)
 state = {"failed": ""}       # why the hand-off failed, when it did
 
 
@@ -152,8 +159,9 @@ def ready() -> bool:
     assert HANDOFF is not None
     stamp, lock, _, cmd = HANDOFF
     try:
-        current = json.loads(stamp.read_text(encoding="utf-8")).get("version") == VERSION
-    except (OSError, ValueError):
+        data = json.loads(stamp.read_text(encoding="utf-8"))
+        current = data.get("version") == VERSION and (BUILD is None or data.get("build") == BUILD)
+    except (OSError, ValueError, AttributeError):
         return False
     return current and not lock.exists() and bool(cmd) and Path(cmd[0]).is_file()
 

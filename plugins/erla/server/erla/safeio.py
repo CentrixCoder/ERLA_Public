@@ -249,6 +249,76 @@ def replace_at(src: WritablePath, dst: WritablePath) -> WritablePath:
     return dst
 
 
+def move_if_absent_at(src: WritablePath, dst: WritablePath) -> bool:
+    """Move ``src`` to ``dst`` only if ``dst`` does not exist (never overwrites); False if it does. A hard link
+    then unlink where the volume has them, else a rename (which does not overwrite on Windows)."""
+    try:
+        os.link(src, dst)
+    except FileExistsError:
+        return False
+    except OSError:
+        if os.name != "nt":
+            raise
+        try:
+            os.rename(src, dst)
+        except FileExistsError:
+            return False
+        return True
+    src.unlink(missing_ok=True)
+    return True
+
+
+def write_plugin_data(name: str, text: str, protected: list[Path]) -> Path | None:
+    """Atomically write ``name`` directly inside the plugin's data folder (``$CLAUDE_PLUGIN_DATA``, set by Claude
+    Code; the web gate's protected-path cache for the launcher). The only write outside the agent root: a plain file
+    name, never a path, and refused (None) when the data folder lies inside any ``protected`` path, such as a
+    library root (G1.1). None also when the variable is unset."""
+    data = os.environ.get("CLAUDE_PLUGIN_DATA")
+    if not data or Path(name).name != name or name in {"", ".", ".."}:
+        return None
+    folder = Path(data)
+    if any(_inside(_norm(folder), _norm(p)) for p in protected):
+        return None
+    dest = folder / name
+    tmp = folder / f"{name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, dest)
+    return dest
+
+
+def plugin_data_path(name: str, protected: list[Path]) -> WritablePath | None:
+    """``name`` directly inside the plugin's data folder, on the same terms as :func:`write_plugin_data` (a plain
+    file name, never inside a ``protected`` path such as a library root), or None."""
+    data = os.environ.get("CLAUDE_PLUGIN_DATA")
+    if not data or Path(name).name != name or name in {"", ".", ".."}:
+        return None
+    folder = Path(data)
+    if any(_inside(_norm(folder), _norm(p)) for p in protected):
+        return None
+    return WritablePath(folder / name)
+
+
+TALLY_KEEP = 2000          # lines a tally file keeps when it is compacted (the oldest go first)
+
+
+def tally_at(p: WritablePath, key: str) -> int:
+    """Append ``key`` as one line and return how many lines equal it, this one included, read and written under
+    the cross-process lock (parallel hook calls must not lose a count). Past 2 * TALLY_KEEP lines the file keeps
+    its newest TALLY_KEEP. Raises OSError when it cannot count; the caller decides (the web gate denies)."""
+    parent_at(p)
+    with _append_lock(p):
+        lines = p.read_text(encoding="utf-8").splitlines() if p.is_file() else []
+        lines.append(key)
+        if len(lines) > 2 * TALLY_KEEP:
+            tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_text("".join(f"{x}\n" for x in lines[-TALLY_KEEP:]), encoding="utf-8")
+            os.replace(tmp, p)
+        else:
+            with open(p, "ab") as fh:
+                fh.write(f"{key}\n".encode("utf-8"))
+        return lines.count(key)
+
+
 @contextmanager
 def open_at(p: WritablePath, mode: str = "w", *, newline: str | None = None,
             encoding: str | None = "utf-8") -> Generator[IO[Any]]:

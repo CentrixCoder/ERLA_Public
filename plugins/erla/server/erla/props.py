@@ -26,24 +26,27 @@ from datetime import datetime, timezone
 from . import quality, units
 from .models import PropertyRecord
 
-VERSION = "props-4"     # audit 2026-10-31: "Tensile Strength, Yield" and "Yield Tensile Strength" are Fty, not Ftu
-#                         (props-3, 0.3.1: no condition copied into a column between two different merged headings;
+VERSION = "props-5"     # 2026-11-02: column headings over several rows, Kc and Sp, gauge = thickness, footnote marks
+#                         (props-4, audit 2026-10-31: "Tensile Strength, Yield" and "Yield Tensile Strength" are Fty;
+#                         props-3, 0.3.1: no condition copied into a column between two different merged headings;
 #                         props-2, 0.2.16: spanned condition cells split by column; wrapped thickness ranges)
-RANGE_UNIT = {"E": "msi", "Ec": "msi", "G": "msi", "KIc": "ksi√in", "density": "lb/in3"}
+RANGE_UNIT = {"E": "msi", "Ec": "msi", "G": "msi", "KIc": "ksi√in", "Kc": "ksi√in", "Sp": "ksi", "density": "lb/in3"}
 
 # Order matters: the first match wins (specific before general).
 QUANTITY_PATTERNS = [
     ("Fcy", r"^f\s*cy\b|^fcy\b|compressive yield"),
     ("Fbru", r"^f\s*bru\b|^fbru\b|bearing ultimate"),
     ("Fbry", r"^f\s*bry\b|^fbry\b|bearing yield"),
+    ("Sp", r"\bproof\s+strength\b|^s\s*p$|^s\s*p\s*[,(]"),           # bolt proof strength (Shigley's Sp)
     ("Fsu", r"^f\s*su\b|^fsu\b|ultimate shear strength|shear ultimate|shear strength"),
     # a tensile strength label that also says yield (the datasheet layout "Tensile Strength, Yield") is the yield
     # strength: checked before Ftu's "tensile strength"
     ("Fty", r"\byield\b.*\btensile\b|\btensile\b.*\byield\b"),
     ("Ftu", r"^f\s*tu\b|^ftu\b|ultimate tensile strength|tensile ultimate|tensile strength|^uts\b|^sut\b|^rm\b"),
-    ("Fty", r"^f\s*ty\b|^fty\b|tensile yield|^yield strength|^yield\b|^sy\b|^rp0\.?2\b"),
+    ("Fty", r"^f\s*ty\b|^fty\b|tensile yield|^yield strength|^yield\b|^(?:minimum|min\.?)\s+yield\b|^sy\b|^rp0\.?2\b"),
     ("elongation", r"^e\s*,\s*percent|^elongation|^elong\b|^e\s*,\s*%|^e\s*\(%\)"),
     ("Ec", r"^ec\b|compressive modulus|modulus of elasticity in compression"),
+    ("Kc", r"^k\s*c\b|plane[- ]stress fracture toughness"),        # before KIc's "fracture toughness"
     ("KIc", r"^k\s*ic\b|^kic\b|fracture toughness"),
     ("E", r"^e\s*[,(]|^e$|young'?s modulus|elastic modulus|modulus of elasticity|tensile modulus"),
     ("G", r"^g\s*[,(]|^g$|shear modulus|modulus of rigidity"),
@@ -56,7 +59,8 @@ CONTEXT_RE = {
     "spec": re.compile(r"^(specification|spec\.?)\b", re.I),
     "form": re.compile(r"^(form|product form|product)\b", re.I),
     "temper": re.compile(r"^(condition|temper|heat treat(?:ment)?)\b", re.I),
-    "thickness": re.compile(r"^(thickness|diameter|thickness or diameter)\b", re.I),
+    # MMPDS prints a footnote letter on the label ('Thicknesse, in'): unread, its wrapped second line joined temper
+    "thickness": re.compile(r"^(thickness|diameter|thickness or diameter|gauge|gage)[a-z]?\b", re.I),
     "basis": re.compile(r"^basis\b", re.I),
     "temperature": re.compile(r"^(temp(?:erature)?|test temperature)\b", re.I),
     "direction": re.compile(r"^(direction|grain direction|orientation)\b", re.I),
@@ -71,11 +75,14 @@ BASIS = re.compile(r"^(A|B|S|typical|typ\.?)\s*([a-z])?$", re.I)
 LABEL_BASIS = re.compile(r"\(\s*([ABS])\s*-\s*basis\s*\)", re.I)        # 'L (S-basis)', 'Fsu, ksi (S-basis):'
 DIRECTION = re.compile(r"^(L|LT|ST|L-T|T-L|S-L|longitudinal|long transverse|short transverse|transverse)"
                        r"\s*(?:\(\s*[ABS]\s*-\s*basis\s*\))?\s*:?$", re.I)
+DIRECTION_WORD = {"LONGITUDINAL": "L", "LONG TRANSVERSE": "LT", "SHORT TRANSVERSE": "ST"}
 SPAN = "\u2063"                                                          # set by pdf.aligned_grid
 QUALIFIER = re.compile(r"^\(?\s*e\s*/\s*d\s*=\s*[\d.]+\s*\)?$", re.I)
 NUMBER = re.compile(r"^([-+]?\d+(?:\.\d+)?)\s*([a-z]{1,2})?$")
 MULTIPLIER = re.compile(r"\b10\s*(?:\^\s*)?(3|6|-3|-6)\s+")
 MD_ROW = re.compile(r"^\|(.*)\|\s*$")
+TABLE_ROW = re.compile(r"^(?:table|tab\.)\s*\d[\w.\-()]*\.?\s+\S", re.I)    # 'Table 2.3.1.0(e). Minimum ...'
+FOOTNOTE_MARK = re.compile(r"(?:\s*\(\s*[a-z]\s*\)|\s*\*+)+\s*$")          # 'Kc (ksi√in.) (a)', 'Strength,*'
 CAPTION_MAT = re.compile(r"properties\s+(?:of|for)\s+(.+?)\s*$", re.I)
 DESIGNATION = re.compile(r"\b(\d{4}-[TOHF]\d{0,5}\w*|Ti-\d+Al-\d+\w*(?:-\d+\w*)*|\d{2}-\d{1,2}\s?PH|AISI\s?\d{4}\w?|"
                          r"300M|D6AC|Hy-Tuf|A-286|Inconel\s?\d+|\d{4}V?)\b", re.I)
@@ -109,7 +116,7 @@ def parse_label(label: str) -> tuple[str | None, str | None, float, str]:
     if not lab:
         return None, None, 1.0, ""
     mult = 1.0
-    lab_u = LABEL_BASIS.sub("", lab).strip().rstrip(":").strip()
+    lab_u = FOOTNOTE_MARK.sub("", LABEL_BASIS.sub("", lab)).strip().rstrip(":").strip()
     m = MULTIPLIER.search(lab_u)
     if m:
         mult = 10.0 ** int(m.group(1))
@@ -164,8 +171,10 @@ def _split_spanned(vals: dict[int, str], filled_cols: set[int], ncol: int) -> tu
         while v and j not in filled_cols and k + 1 < ncol and vals.get(k + 1) == v and k + 1 not in filled_cols:
             k += 1
         n = k - j + 1
-        if v and n > 1 and not JOINT_LIST.search(v):
-            toks = _temper_tokens(v)
+        toks = _temper_tokens(v) if v else []
+        if any(re.fullmatch(r"[#<>≤≥]?\s*[\d.]+(?:\s*-\s*[\d.]*)?", t) for t in toks):
+            toks = []                           # a range is no condition: 'T4 0.025-0.100' is not two (props-5)
+        if v and n > 1 and not JOINT_LIST.search(v) and toks:
             if len(toks) == n:
                 for off, t in enumerate(toks):
                     vals[j + off] = t
@@ -458,24 +467,79 @@ def rows_layout(grid: list[list[str]], caption: str, cq: dict | None, ocr: bool,
     return out
 
 
+def _stacked_heads(block: list[list[str]], ncol: int) -> tuple[dict[int, tuple], dict[int, str], dict[int, str]]:
+    """Column headings printed over several rows (props-5): ASM 'Kc (ksi√in.)' over L-T and T-L with Alloy,
+    Temper and Gauge a row below and the directions below that; Shigley 'Minimum / Proof / Strength,* / kpsi'.
+    Per column, the first heading cell that names a quantity is its label, else the cells top to bottom (a
+    direction cell aside) read as one; a unit printed in a cell of its own ('kpsi') completes it. A context
+    heading is read from the cell nearest the data. Returns (property columns -> parse_label, context columns
+    -> field, column -> direction)."""
+    pcols: dict[int, tuple] = {}
+    ccols: dict[int, str] = {}
+    dirs: dict[int, str] = {}
+    for j in range(ncol):
+        cells = [r[j] for r in block if j < len(r) and r[j]]
+        d = next((c for c in cells if DIRECTION.match(c)), None)
+        if d:
+            code = DIRECTION.match(d).group(1).upper()                         # type: ignore[union-attr]
+            code = DIRECTION_WORD.get(code, code)
+            if code != "TRANSVERSE":                    # LT or ST: the heading does not say which
+                dirs[j] = code
+        cells = [c for c in cells if c != d]
+        if not cells:
+            continue
+        joined = " ".join(cells)
+        label = next((x for c in cells if (x := parse_label(c))[0]), None) or parse_label(joined)
+        if label[0]:
+            if not label[1]:
+                unit = next((x for c in cells if (x := parse_label("u " + c))[1]), None)
+                if unit:
+                    label = (label[0], unit[1], unit[2], label[3])
+            pcols[j] = label
+            continue
+        f = next((f for c in reversed(cells) for f, rx in CONTEXT_RE.items() if rx.search(c)), None) or next(
+            (f for f, rx in CONTEXT_RE.items() if rx.search(joined)), None)
+        if f:
+            ccols[j] = f
+    return pcols, ccols, dirs
+
+
 def cols_layout(grid: list[list[str]], caption: str, cq: dict | None, ocr: bool) -> list[PropertyRecord]:
-    """Columns = properties: header row names properties with units; context columns give conditions."""
-    hdr_i = next((i for i, r in enumerate(grid[:3])
-                  if sum(1 for c in r if parse_label(c)[0]) >= 1), None)
-    if hdr_i is None:
-        return []
-    hdr = grid[hdr_i]
-    pcols = {j: parse_label(c) for j, c in enumerate(hdr) if parse_label(c)[0]}
-    ccols = {j: f for j, c in enumerate(hdr) for f, rx in CONTEXT_RE.items() if c and rx.search(c) and j not in pcols}
+    """Columns = properties: header row names properties with units; context columns give conditions.
+    Headings over several rows (from the row naming a quantity to the first row that holds a number) are
+    read together; a direction printed under a quantity heading applies to that column (props-5). A 'Table
+    x' caption row after the data starts another table, read with its own headings."""
+    grid = [[re.sub(r"\s+", " ", c.replace(SPAN, " ")).strip() for c in r] for r in grid]
+    ncol = max(len(r) for r in grid)
+    first = next((i for i, r in enumerate(grid) if any(_number(c)[0] is not None for c in r)), len(grid))
+    hdr_i = next((i for i, r in enumerate(grid[:3]) if sum(1 for c in r if parse_label(c)[0]) >= 1), None)
+    top = hdr_i if hdr_i is not None else 0
+    pcols, ccols, dirs = _stacked_heads(grid[top:first], ncol) if top < first <= 8 else ({}, {}, {})
+    if pcols:
+        hdr, body = [""] * ncol, grid[first:]
+    else:
+        if hdr_i is None:
+            return []
+        hdr, body, dirs = grid[hdr_i], grid[hdr_i + 1:], {}
+        pcols = {j: parse_label(c) for j, c in enumerate(hdr) if parse_label(c)[0]}
+        ccols = {j: f for j, c in enumerate(hdr) for f, rx in CONTEXT_RE.items() if c and rx.search(c) and j not in pcols}
+    nxt = next((k for k, r in enumerate(body) if TABLE_ROW.match(next((c for c in r if c), ""))), None)
+    rest: list[PropertyRecord] = []
+    if nxt is not None:
+        title = next(c for c in body[nxt] if c)
+        rest = cols_layout(body[nxt + 1:], title, cq, ocr) if len(body) - nxt > 2 else []
+        body = body[:nxt]
     cap_mat = _material_from_caption(caption)
     out: list[dict] = []
-    for r in grid[hdr_i + 1:]:
-        r = r + [""] * (len(hdr) - len(r))
-        ctx = {f: (r[j] or None) for j, f in ccols.items()}
+    for r in body:
+        r = r + [""] * (max(len(hdr), ncol) - len(r))
+        # a dash is no condition; a thickness without a number ('Batch B' wrapped into the column) is none
+        ctx = {f: (r[j] if re.search(r"\d" if f == "thickness" else r"[^\s\-–—_]", r[j]) else None)
+               for j, f in ccols.items()}
         if not ctx.get("material"):
-            first = r[0] if 0 not in pcols else ""
-            m = DESIGNATION.search(first or "")
-            ctx["material"] = (first if m else None) or cap_mat
+            lead = r[0] if 0 not in pcols else ""
+            m = DESIGNATION.search(lead or "")
+            ctx["material"] = (lead if m else None) or cap_mat
         basis, bfoot = _basis(ctx.get("basis"))
         ctx["basis"] = basis
         if ctx.get("direction") and not DIRECTION.match(ctx["direction"]):
@@ -487,10 +551,11 @@ def cols_layout(grid: list[list[str]], caption: str, cq: dict | None, ocr: bool)
             if v is None:
                 continue
             extra = [f"BASIS_FOOTNOTE:{bfoot}"] if bfoot else []
-            out.append(_record(q, v, r[j].strip(), unit, mult, ctx, lab,
+            c = {**ctx, "direction": dirs[j]} if j in dirs and not ctx.get("direction") else ctx
+            out.append(_record(q, v, r[j].strip(), unit, mult, c, lab,
                                "; ".join(f"{f}={ctx[f]}" for f in ("material", "temper", "form") if ctx.get(f)),
                                caption, foot, extra, cq, ocr))
-    return out
+    return out + rest
 
 
 def extract_from_text(text: str, chunk_quality: dict | None = None, ocr: bool = False,

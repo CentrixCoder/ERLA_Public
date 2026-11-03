@@ -21,6 +21,7 @@ every document from stored chunks when REFS_VERSION changes. A document never ci
 
 from __future__ import annotations
 
+import bisect
 import re
 import sqlite3
 from functools import lru_cache
@@ -30,7 +31,7 @@ from typing import Any
 from . import store
 from .classify import STD_PATTERNS, std_key
 
-REFS_VERSION = "2"
+REFS_VERSION = "3"           # 3: AC 25.571-1D, CS 25.571, MIL-HDBK volumes, ASTM E8M, possessives, edition window
 MIN_COUNT = 1
 EDITION_WINDOW = 120         # characters after a book name in which its edition is read
 
@@ -54,12 +55,17 @@ _EXTRA_STANDARDS = [
     r"\b(ECSS-[A-Z]-[A-Z]{2}-\d{2}(?:-\d{2})?)([A-Z])?\b",
     r"\b(NACE [A-Z]{2}\d{4})\b()",
     r"\b(NASA-HDBK-\d+)([A-Z])?\b",
+    r"\b(MIL-HDBK-\d+-\d+)([A-Z])?\b",                          # a volume: MIL-HDBK-17-2F (F-23)
+]
+_FIRST_STANDARDS = [    # before STD_PATTERNS: an equal span goes to the pattern found first (stable sort)
+    r"\b(ASTM [A-G]\d{1,4}M?)(?:/[A-G]\d{1,4}M)?(?:[-/](\d{2,4}[a-z]?))?\b",   # E8/E8M-16a, E8M-04 (F-24)
 ]
 _REGULATIONS = [
     r"\b(14 CFR (?:Part )?\d+(?:\.\d+)?)()",
     r"\b(FAR (?:Part )?\d+(?:\.\d+)?)()",
-    r"\b(AC \d{2,3}-\d+)([A-Z])?\b",
+    r"\b(AC \d{2,3}(?:\.\d+)?-\d+)([A-Z])?\b",                 # AC 20-107B, AC 25.571-1D (F-19)
     r"\b(CS-\d{2,3}(?:\.\d+)?)()",
+    r"\b(CS \d{2,3}\.\d+)()",                                   # EASA CS 25.571 (F-19)
     r"\b((?:RTCA )?DO-\d{3})([A-Z])?\b",
     r"\b(DOT/FAA/[A-Z]{2,3}-\d{2}/\d+)()",
 ]
@@ -90,7 +96,7 @@ def _compile(pats: list[str]) -> list[re.Pattern[str]]:
 
 
 _KINDS: list[tuple[str, list[re.Pattern[str]]]] = [
-    ("standard", list(STD_PATTERNS) + _compile(_EXTRA_STANDARDS)),
+    ("standard", _compile(_FIRST_STANDARDS) + list(STD_PATTERNS) + _compile(_EXTRA_STANDARDS)),
     ("regulation", _compile(_REGULATIONS)),
     ("spec", _compile(_SPECS)),
 ]
@@ -110,14 +116,29 @@ _RUN: list[tuple[int, str, re.Pattern[str], tuple[str, ...]]] = [
 _SPEC_WORDS = ("spec", "procedure", "drawing", "dwg")
 _EDITION_HINTS = ("ed.", "ed)", "ed,", " ed ", "dition")
 _PREFIX = {"standard": "", "regulation": "", "spec": "SPEC:", "book": "REF:", "site": "SITE:"}
+_POSSESSIVE = re.compile(r"['’][Ss]\b")     # "Hoerner's" is the book Hoerner (F-21)
 
 
 def ref_key(kind: str, ident: str) -> str:
     """Spelling-independent key: 'standard'/'regulation' keys are std_key (as documents.standard_id), so a citation
     joins the documents that are that standard; books are REF:<NAME>, specs SPEC:<ID>, site patterns SITE:<ID>."""
     if kind == "book":
-        return "REF:" + re.sub(r"[^A-Z0-9&]+", " ", ident.upper().replace("’", "'").replace("'S ", " ")).strip()
+        return "REF:" + re.sub(r"[^A-Z0-9&]+", " ", _POSSESSIVE.sub("", ident.upper().replace("’", "'"))).strip()
     return _PREFIX.get(kind, "") + std_key(ident)
+
+
+_DIGIT_RUN = re.compile(r"\d+")
+_SENTENCE_END = re.compile(r"\.\s+(?=[A-Z][a-z])|;|\n")    # 'Peterson. Plate', not 'Peterson, R. E., 3rd ed.'
+
+
+def _bare_number(ident: str) -> bool:
+    """A number without letters that cannot be a specification or drawing number: 'spec 2', 'Drawing 5',
+    'Specification 3.2.1' (a section), 'drawing 1 of 3' (F-22). Kept: five digits or more (Dwg 1234567), or
+    digit groups joined by a dash with a group of three or more (123-4567-001)."""
+    if any(c.isalpha() for c in ident):
+        return False
+    runs = [len(r) for r in _DIGIT_RUN.findall(ident)]
+    return not (max(runs, default=0) >= 5 or ("-" in ident and max(runs, default=0) >= 3))
 
 
 def _edition(text: str) -> str | None:
@@ -252,7 +273,7 @@ def extract(texts, rules: dict[str, Any] | None = None, max_chars: int = 2_000_0
             if not trig and kind == "spec" and not any(w in tl for w in _SPEC_WORDS):
                 continue
             for m in pat.finditer(t):
-                if kind == "spec" and not any(ch.isdigit() for ch in m.group(1)):
+                if kind == "spec" and (not any(ch.isdigit() for ch in m.group(1)) or _bare_number(m.group(1))):
                     continue
                 rev = m.group(2) if (m.lastindex or 0) >= 2 and kind != "spec" else None
                 cands.append((m.start(1), m.end(1), rank, kind, m.group(1), rev or None))
@@ -266,6 +287,7 @@ def extract(texts, rules: dict[str, Any] | None = None, max_chars: int = 2_000_0
             for m in pat.finditer(t):
                 add(kind if kind in _PREFIX else "site", m.group(1) if pat.groups else m.group(0))
         named = _Spans(len(t))
+        hits: list[tuple[int, str]] = []
         for pat, canon, low in rules.get("books", ()):
             if low not in tl:
                 continue
@@ -273,7 +295,15 @@ def extract(texts, rules: dict[str, Any] | None = None, max_chars: int = 2_000_0
                 if named.covers(m.start()):
                     continue
                 named.add(m.start(), m.end())
-                add("book", canon, _edition(t[m.end(): m.end() + EDITION_WINDOW]))
+                hits.append((m.end(), canon))
+        starts = sorted(a for a, _b in named.spans)
+        for b, canon in hits:            # the edition window ends at a sentence break or the next known name (F-20)
+            hi = b + EDITION_WINDOW
+            i = bisect.bisect_left(starts, b)
+            if i < len(starts):
+                hi = min(hi, starts[i])
+            stop = _SENTENCE_END.search(t, b, hi)
+            add("book", canon, _edition(t[b: stop.start() if stop else hi]))
         if any(h in tl for h in _EDITION_HINTS):
             for m in _EDITION.finditer(t):            # edition markers are rare: look back from each for its name
                 lo = max(0, m.start() - GENERIC_LOOKBACK)
@@ -283,7 +313,7 @@ def extract(texts, rules: dict[str, Any] | None = None, max_chars: int = 2_000_0
                 nm = _NAME.search(t, base, m.start())
                 if nm is None:
                     continue
-                name = nm.group(1)
+                name = _POSSESSIVE.sub("", nm.group(1))
                 if (name.split()[0] in _NOT_A_NAME
                         or named.starts_in(base, m.end())                       # a known name in the citation
                         or taken.covers(nm.start(1))):
@@ -415,10 +445,12 @@ def library_refs(con: sqlite3.Connection, standard: str, k: int = 50, cfg: Any =
     if store.has_table(con, "refs"):
         ed_sql = "r.edition" if store.has_column(con, "refs", "edition") else "NULL"
         marks = ",".join("?" * len(keys))
+        vols = [key + "/%" for key in keys if key.startswith("MILHDBK") and "/" not in key]   # its volumes (F-23)
+        vol_sql = "".join(" OR r.std_key LIKE ?" for _v in vols)
         for r in con.execute(f"SELECT r.doc_id, r.n, d.title, d.authority_tier, d.year, d.classification_flag, {ed_sql}, "
-                             f"r.standard_id FROM refs r JOIN documents d ON d.doc_id=r.doc_id WHERE r.std_key IN ({marks}) "
-                             "AND r.doc_id NOT IN (SELECT doc_id FROM duplicates) "
-                             "ORDER BY r.n DESC LIMIT ?", (*keys, k)):
+                             f"r.standard_id FROM refs r JOIN documents d ON d.doc_id=r.doc_id WHERE (r.std_key IN ({marks})"
+                             f"{vol_sql}) AND r.doc_id NOT IN (SELECT doc_id FROM duplicates) "
+                             "ORDER BY r.n DESC LIMIT ?", (*keys, *vols, k)):
             citing.append({"doc_id": r[0], "mentions": r[1], "title": r[2], "tier": r[3], "year": r[4], "flag": r[5],
                            "cited_as": r[7], "editions_cited": r[6].split(",") if r[6] else []})
     built = store.get_meta(con, "refs_version") == REFS_VERSION

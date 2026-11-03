@@ -68,10 +68,24 @@ def detect_markings(text_head: str, text_tail: str = "") -> str | None:
 
 # Most restrictive first. Site-defined flags (path rules) rank after these and before no flag.
 FLAG_ORDER = ("ITAR", "EAR", "EXPORT_CONTROLLED", "CUI", "DISTRIBUTION_LIMITED", "PROPRIETARY")
+# F-37 (audit D6), G2.5: a document with no text to classify (image-only with OCR pending or OCR off, an empty or
+# failed extraction) may carry any marking in its pixels, so it is "unknown - local only": flagged, labelled and kept
+# off the web like any flagged document until its text is classified. It ranks after every other flag, so a real
+# marking (its own or a copy's) is always the label shown; its text, when it arrives, replaces it.
+UNKNOWN = "UNKNOWN"
+UNREAD_SQL = "(ocr_pending = 1 OR extract_status IN ('empty', 'failed'))"
 
 
 def flag_rank(flag: str) -> tuple[int, str]:
+    if flag == UNKNOWN:
+        return (len(FLAG_ORDER) + 1, "")
     return (FLAG_ORDER.index(flag), "") if flag in FLAG_ORDER else (len(FLAG_ORDER), flag)
+
+
+def unread_flag(found: str | None, has_text: bool, ocr_pending: bool) -> str | None:
+    """The flag a document is written with: what its folder rule or text says, else UNKNOWN when it has no text
+    (or pages still waiting for OCR) to say it (F-37)."""
+    return found or (UNKNOWN if ocr_pending or not has_text else None)
 
 
 def most_restrictive(flags: Iterable[str | None]) -> str | None:
@@ -87,10 +101,17 @@ def copy_group_flags(con: sqlite3.Connection) -> dict[int, str]:
     flag; documents outside such a group are absent. Which copy became the canonical record depends on
     scan and extraction order, so the flag must not: an unflagged copy indexed before the flagged
     original carried the original's text unlabelled until 0.2.18. Read-only; the indexer writes the
-    result (reconcile_copy_flags) and readers apply it before that refresh has run."""
+    result (reconcile_copy_flags) and readers apply it before that refresh has run.
+
+    F-37: a document with no text to classify yet (UNREAD_SQL) counts as UNKNOWN here, in a group or alone, so
+    an index written before 1.0 protects it too (every reader applies this map through effective_flag)."""
     from .store import has_table
+    cols = {str(r[1]) for r in con.execute("PRAGMA table_info(documents)")}
+    unread = {int(r[0]): UNKNOWN for r in con.execute(
+        f"SELECT doc_id FROM documents WHERE {UNREAD_SQL} AND classification_flag IS NULL")
+    } if {"ocr_pending", "extract_status"} <= cols else {}
     if not has_table(con, "duplicates"):
-        return {}
+        return unread
     parent: dict[int, int] = {}
 
     def find(x: int) -> int:
@@ -105,14 +126,15 @@ def copy_group_flags(con: sqlite3.Connection) -> dict[int, str]:
         if a != b:
             parent[a] = b
     if not parent:
-        return {}
+        return unread
     group_flag: dict[int, str] = {}
-    for doc_id, flag in con.execute(
-            "SELECT doc_id, classification_flag FROM documents WHERE classification_flag IS NOT NULL"):
+    flagged = [(int(d), str(f)) for d, f in con.execute(
+        "SELECT doc_id, classification_flag FROM documents WHERE classification_flag IS NOT NULL")]
+    for doc_id, flag in [*flagged, *unread.items()]:
         if doc_id in parent:
             root = find(doc_id)
             group_flag[root] = most_restrictive([group_flag.get(root), flag]) or flag
-    return {d: group_flag[find(d)] for d in list(parent) if find(d) in group_flag}
+    return {**unread, **{d: group_flag[find(d)] for d in list(parent) if find(d) in group_flag}}
 
 
 def effective_flag(own: str | None, doc_id: int, groups: dict[int, str]) -> str | None:
@@ -461,14 +483,38 @@ def _candidates(q: str) -> list[str]:
     ("kestrel-9", "lc-447"); a material designation such as "7050-t7451" has one letter and is not one."""
     found: set[str] = set()
     words = _TOKEN_RE.findall(q)
-    # a code written apart ("lc 447") is also tried joined, as an index stores it ("lc-447")
-    joined = [f"{a}-{b}" for a, b in zip(words, words[1:]) if a.isalpha() and len(a) <= 4 and b.isdigit()]
+    # a code written apart ("lc 447", "l c 447", "447 lc", "kestrel 9") is also tried joined; how it is
+    # split or joined does not matter after that (_code_match)
+    joined: list[str] = []
+    for i in range(len(words)):
+        for n in (2, 3):
+            part = words[i:i + n]
+            if len(part) == n and (all(len(w) <= 4 for w in part)
+                                   or (n == 2 and part[0].isalpha() and part[1].isdigit() and len(part[1]) <= 3)):
+                joined.append("".join(part))
+    codes: set[str] = set()
     for t in words + joined:
         for p in (t, *re.split(r"[-.]", t)):
             letters, digits = sum(c.isalpha() for c in p), sum(c.isdigit() for c in p)
-            if (letters >= 5 and not digits) or (letters >= 2 and digits and len(p) >= 4):
+            if letters >= 5 and not digits:
                 found.add(p)
-    return sorted(found - MARKING_WORDS)[:40]
+            elif letters >= 2 and digits and len(p) >= 4:
+                codes.add(p)
+    # codes first: they always name something, so a query padded with words cannot push one past the cap
+    return [*sorted(codes - MARKING_WORDS), *sorted(found - MARKING_WORDS)][:40]
+
+
+def _code_match(tok: str) -> tuple[str, re.Pattern[str]]:
+    """The FTS query and the text pattern for a query word. A code with letters and digits matches however
+    its letter and digit groups are split or joined: "lc447", "lc-447", "LC.447", "lc 447" and "l-c-447"
+    are one code, as the index may store any of them (correctness audit 2026-10-31 Minor). Other words
+    match as written."""
+    if not (re.search(r"[a-z]", tok) and re.search(r"\d", tok)):
+        return f'"{tok}" OR "{tok}"*', re.compile(rf"(?<![a-z0-9]){re.escape(tok)}", re.I)
+    runs = re.findall(r"[a-z]+|\d+", tok)
+    forms = dict.fromkeys([tok, "".join(runs), "-".join(runs), ".".join(runs), " ".join(runs)])
+    return (" OR ".join(f'"{f}" OR "{f}"*' for f in forms),
+            re.compile(r"(?<![a-z0-9])" + r"[\W_]{0,3}".join(re.escape(r) for r in runs), re.I))
 
 
 def _restricted_name(con: sqlite3.Connection, q: str, docs: list, flagged: set[int],
@@ -481,11 +527,10 @@ def _restricted_name(con: sqlite3.Connection, q: str, docs: list, flagged: set[i
     for tok in _candidates(q):
         if tok in allowed:
             continue
-        rx = re.compile(rf"(?<![a-z0-9]){re.escape(tok)}", re.I)
+        match, rx = _code_match(tok)
         if any(rx.search(_fold(f"{Path(r['path']).stem} {r['title'] or ''}"))
                for r in docs if r["doc_id"] not in flagged):
             continue                                    # an unflagged document is named with it
-        match = f'"{tok}" OR "{tok}"*'
         rows = con.execute("SELECT c.doc_id, c.text FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.rowid "
                            "WHERE chunks_fts MATCH ? LIMIT 400", (match,)).fetchall()
         unflagged = con.execute(
@@ -507,6 +552,28 @@ def _restricted_name(con: sqlite3.Connection, q: str, docs: list, flagged: set[i
             doc = next(r for r in docs if r["doc_id"] in source)
             return Path(doc["path"]).name
     return None
+
+
+# G5.4: shadow libraries serve pirated copies of standards and books, so a search or fetch naming one is never sent.
+# Matched on the decoded, normalised outbound text by name, whatever the TLD or mirror (libgen.rs/.is/.li/.gs,
+# sci-hub.se/.ru/.st, z-lib.org, z-library.sk, annas-archive.org/.se/.li ...). Short or generic forms match only as a
+# domain: "zlib" alone is the compression library (zlib.net is its official site) and is not listed.
+_SEP = r"[-‐‑‒–—_.\s]?"
+SHADOW_LIBRARY = re.compile(
+    r"(?<![a-z0-9])(?:"
+    rf"lib{_SEP}gen|library\s+genesis|gen\.lib\.rus\.ec|library\.lol|"
+    rf"sci{_SEP}hub|"
+    r"z[-‐‑‒–—_.\s]lib(?:rary)?|zlibrary|"
+    rf"anna(?:'|’)?s{_SEP}archive|"
+    rf"pdf{_SEP}drive|bookfi|"
+    r"(?:b-ok|1lib|singlelogin|booksc|bookzz)(?=\.[a-z]{2,})"
+    r")(?![a-z0-9])", re.I)
+
+
+def shadow_library(text: str) -> str | None:
+    """G5.4: the shadow-library name this outbound text names (search words, a URL, a domain filter), or None."""
+    m = SHADOW_LIBRARY.search(_plain(_normalize(expand_outbound(text))).casefold())
+    return m.group(0) if m else None
 
 
 def web_allow_terms(cfg: object | None) -> list[str]:

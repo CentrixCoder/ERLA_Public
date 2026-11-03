@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 from .base import Chunk, Extractor, ExtractResult, clean, rows_to_markdown, split_long
 
@@ -104,21 +105,92 @@ SPAN_SEP = "\u2063"     # invisible separator: marks a phrase that spans several
 
 REL_PREFIX = {"#", "≤", "<", "≥", ">", "<=", ">=", "\uf0a3", "\uf0b3"}   # '#' = '≤' in MMPDS Symbol font
 VALUE_LIKE = re.compile(r"^[-+]?\d*\.?\d+[a-z]{0,2}$|^\d*\.?\d+\s*-\s*\d*\.?\d*$|^[ABS]$")  # 55, 0.012-0.039, A
+CODE_TOKEN = re.compile(r"^[A-Z]{1,2}\d{1,5}[A-Z\d]*$")      # a temper or condition code: T3, T351, H1150
 
 
-def aligned_grid(page, clip=None, y_tol: float = 3.2, gap: float = 12.0) -> tuple[list[list[str]], str]:
-    """A2 for borderless tables (MMPDS-10+ allowables pages): rebuild rows and columns from geometry.
+def _turn(main: tuple[int, int], w: float, h: float):
+    """Box in the unturned page's coordinates -> box in reading orientation, for text running ``main``."""
+    if main == (0, -1):                                          # bottom-to-top (a page turned with /Rotate 90)
+        return lambda b: (h - b[3], b[0], h - b[1], b[2])
+    if main == (0, 1):                                           # top-to-bottom
+        return lambda b: (b[1], w - b[2], b[3], w - b[0])
+    return lambda b: (w - b[2], h - b[3], w - b[0], h - b[1])    # upside down
 
-    Returns (grid, caption). The caption line ('Table 3.7.9.0(b1). Design ... of 7075 Aluminum Alloy')
-    and centred continuation lines directly below it are returned as the caption, not as rows; the
-    page header above the caption is ignored. Data columns = x-centres of the numbers on the line with
-    the most numbers (the widest data row). Text left of the first data column is the row label. Other
-    phrases go to the nearest data column; a phrase covering several column centres (a spanning
-    header such as 'Sheet', or a thickness range centred over an A/B pair) is placed in each column it
-    covers, marked with SPAN_SEP."""
-    words = page.get_text("words", clip=clip) if clip is not None else page.get_text("words")
-    if not words:
-        return [], ""
+
+def _once(words: list[tuple]) -> list[tuple]:
+    """Each word once: a word printed again over itself (a tagged heading drawn twice, ASM Handbook tables:
+    'Kc' over 'Kc (ksi√in.)', 'Gauge' over 'Gauge (in.)') would read 'Kc Kc'. Same text and boxes overlapping
+    by half the smaller one is a copy."""
+    kept: dict[str, list[tuple]] = {}
+    out = []
+    for wd in words:
+        area = max((wd[2] - wd[0]) * (wd[3] - wd[1]), 1e-6)
+        dup = False
+        for k in kept.get(wd[4], []):
+            ix = min(wd[2], k[2]) - max(wd[0], k[0])
+            iy = min(wd[3], k[3]) - max(wd[1], k[1])
+            if ix > 0 and iy > 0 and ix * iy >= 0.5 * min(area, (k[2] - k[0]) * (k[3] - k[1])):
+                dup = True
+                break
+        if not dup:
+            kept.setdefault(wd[4], []).append(wd)
+            out.append(wd)
+    return out
+
+
+SIZE_BREAK = re.compile(r"[\d\-–]")     # a digit or dash: where a stacked fraction meets full-size text
+
+
+def reading_words(page, clip=None, split_sizes: bool = False, once: bool = True) -> list[tuple]:
+    """The page's words as (x0, y0, x1, y1, text) in reading orientation, each printed word once.
+
+    A landscape table is often a portrait page turned with /Rotate 90 and drawn bottom-to-top (MMPDS-11
+    p.1007). Its words come in the unturned page's coordinates, where each printed column is one "line", so
+    the table read as a single caption line and was lost. When most text lines run in another direction than
+    left to right, the words of those lines are built from their characters and turned to reading
+    orientation; lines in other directions (the page header, printed upright on the unturned page) are left
+    out. Upright pages keep get_text("words") unless ``split_sizes``: then words are built from characters
+    too and split where a digit or dash meets one of a clearly different size (Shigley's stacked '1/4'
+    printed against '–1' reads '4–1' as one word)."""
+    from collections import Counter
+
+    def text(kind: str) -> Any:
+        return page.get_text(kind, clip=clip) if clip is not None else page.get_text(kind)
+
+    def lines_of(d: dict) -> list[dict]:
+        return [ln for b in d.get("blocks", []) if b.get("type") == 0 for ln in b.get("lines", [])]
+
+    dirs = Counter((round(ln["dir"][0]), round(ln["dir"][1])) for ln in lines_of(text("dict")))
+    main = dirs.most_common(1)[0][0] if dirs else (1, 0)
+    upright = main in ((1, 0), (0, 0))
+    if upright and not split_sizes:
+        words = [tuple(w[:5]) for w in text("words")]
+        return _once(words) if once else words
+    lines = lines_of(text("rawdict"))
+    box = page.cropbox
+    turn = (lambda b: b) if upright else _turn(main, box.width, box.height)
+    out: list[tuple] = []
+    for ln in lines:
+        if not upright and (round(ln["dir"][0]), round(ln["dir"][1])) != main:
+            continue
+        cur: list[dict] = []                                     # a word may run over spans ('(b' + '4)')
+        chars = [{**c, "size": span.get("size", 0.0)} for span in ln.get("spans", []) for c in span.get("chars", [])]
+        for ch in [*chars, {"c": " ", "size": 0.0}]:
+            prev = cur[-1] if cur else None
+            if ch["c"].strip() and not (split_sizes and prev and SIZE_BREAK.match(prev["c"]) and SIZE_BREAK.match(ch["c"])
+                                        and abs(ch["size"] - prev["size"]) > 0.2 * max(ch["size"], prev["size"])):
+                cur.append(ch)
+                continue
+            if cur:
+                b = (min(c["bbox"][0] for c in cur), min(c["bbox"][1] for c in cur),
+                     max(c["bbox"][2] for c in cur), max(c["bbox"][3] for c in cur))
+                out.append((*turn(b), "".join(c["c"] for c in cur)))
+            cur = [ch] if ch["c"].strip() else []
+    return _once(out) if once else out
+
+
+def _lines(words: list[tuple], y_tol: float) -> list[list]:
+    """Words grouped into printed lines by their vertical centre: [[y centre, words left to right], ...]."""
     words = sorted(words, key=lambda w: ((w[1] + w[3]) / 2, w[0]))
     lines: list[list] = []
     for w in words:
@@ -129,6 +201,44 @@ def aligned_grid(page, clip=None, y_tol: float = 3.2, gap: float = 12.0) -> tupl
             lines.append([yc, [w]])
     for ln in lines:
         ln[1].sort(key=lambda w: w[0])
+    return lines
+
+
+def _centred_groups(mids: list[float], centers: list[float], half: float) -> list[tuple[int, int]] | None:
+    """Column groups of headings each printed centred over its group, left to right from the first data
+    column: a group starting at column a with its heading centred at m ends at the column nearest the mirror
+    image of a about m. Only a chain that ends exactly on the last column is taken (otherwise None): headings
+    printed left-aligned, or over only some columns, do not close it, and those lines keep the old placement."""
+    out: list[tuple[int, int]] = []
+    start = 0
+    for m in mids:
+        if start >= len(centers):
+            return None
+        mirror = 2 * m - centers[start]
+        end = min(range(len(centers)), key=lambda k: abs(centers[k] - mirror))
+        if end < start or abs(centers[end] - mirror) > half or not centers[start] - half <= m <= centers[end] + half:
+            return None
+        out.append((start, end))
+        start = end + 1
+    return out if start == len(centers) else None
+
+
+def aligned_grid(page, clip=None, y_tol: float = 3.2, gap: float = 12.0,
+                 code_columns: bool = True, once: bool = True) -> tuple[list[list[str]], str]:
+    """A2 for borderless tables (MMPDS-10+ allowables pages): rebuild rows and columns from geometry.
+
+    Returns (grid, caption). The caption line ('Table 3.7.9.0(b1). Design ... of 7075 Aluminum Alloy')
+    and centred continuation lines directly below it are returned as the caption, not as rows; the
+    page header above the caption is ignored. Data columns = x-centres of the numbers on the line with
+    the most numbers (the widest data row). Text left of the first data column is the row label. Other
+    phrases go to the nearest data column; a phrase covering several column centres (a spanning
+    header such as 'Sheet', or a thickness range centred over an A/B pair) is placed in each column it
+    covers, marked with SPAN_SEP. A temper code standing between the numbers of that line ('2024  T3
+    0.063  145') is a column of its own. Words are read in reading orientation (reading_words)."""
+    words = reading_words(page, clip, once=once)
+    if not words:
+        return [], ""
+    lines = _lines(words, y_tol)
     text_of = lambda ws: " ".join(w[4] for w in ws)                       # noqa: E731
     caption, start = "", 0
     ci = next((i for i, (_y, ws) in enumerate(lines) if CAPTION.match(text_of(ws))), None)
@@ -149,9 +259,14 @@ def aligned_grid(page, clip=None, y_tol: float = 3.2, gap: float = 12.0) -> tupl
     tmpl = max(body, key=lambda ln: sum(1 for w in ln[1] if NUM_TOKEN.match(w[4])), default=None)
     if tmpl is None:
         return [], caption
-    centers = [(w[0] + w[2]) / 2 for w in tmpl[1] if NUM_TOKEN.match(w[4])]
+    nums = [w for w in tmpl[1] if NUM_TOKEN.match(w[4])]
+    centers = [(w[0] + w[2]) / 2 for w in nums]
     if len(centers) < 2:
         return [], caption
+    # ASM Handbook: '2024  T3  0.063  145 ...' - without its own column the temper joined the gauge cell
+    codes = [(w[0] + w[2]) / 2 for w in tmpl[1] if code_columns and CODE_TOKEN.match(w[4])
+             and nums[0][2] < w[0] and w[2] < nums[-1][0]]
+    centers = sorted(centers + [c for c in codes if min(abs(c - x) for x in centers) >= 15.0])
     half = min(b - a for a, b in zip(centers, centers[1:])) / 2
     label_edge = centers[0] - max(half, 8.0)
     tol = max(half * 0.5, 3.0)
@@ -175,6 +290,18 @@ def aligned_grid(page, clip=None, y_tol: float = 3.2, gap: float = 12.0) -> tupl
             if not VALUE_LIKE.match(text) and not NUM_TOKEN.match(text) and not text.startswith(tuple(REL_PREFIX)):
                 grid.append([LEADER.sub("", row[0]).strip(" .")] + [f"{SPAN_SEP}{text}"] * len(centers))
                 continue
+        # several text phrases on a labelled line, each centred over its own group of columns (MMPDS 'Sheet'
+        # over two columns, 'Plate' over sixteen): each reaches only its middle column by position
+        texts = [" ".join(w[4] for w in ph) for ph in phrases]
+        groups = _centred_groups([(ph[0][0] + ph[-1][2]) / 2 for ph in phrases], centers, half) if (
+            row[0] and len(phrases) >= 2 and not any(VALUE_LIKE.match(t) or NUM_TOKEN.match(t)
+                                                      or t.startswith(tuple(REL_PREFIX)) for t in texts)) else None
+        if groups:
+            for t, (a, b) in zip(texts, groups):
+                for i in range(a, b + 1):
+                    row[i + 1] = f"{SPAN_SEP}{t}" if b > a else t
+            grid.append([LEADER.sub("", c).strip(" .") for c in row])
+            continue
         for ph in phrases:
             x0, x1 = ph[0][0], ph[-1][2]
             text = " ".join(w[4] for w in ph)
@@ -196,20 +323,214 @@ def _merged(rows: list[list[str]]) -> bool:
     return any((c or "").count("\n") >= 2 for r in rows for c in r)
 
 
+# ------------------------------------------------------------------ borderless tables on other pages
+NUMERIC_PHRASE = re.compile(r"^[(±+\-−]?\d[\d.,/ ]*[a-z]{0,2}[*)%]?$")     # 85, 0.031 8, 3/4, 1 1/4, 67b
+LEADER_WORD = re.compile(r"\.{4,}")                                        # a contents line, not a table row
+FRACTION_PART = re.compile(r"^\d{1,2}$")
+GROUP_HEAD = re.compile(r"^\d*\.\d{3}(?: \d{3})*$")                       # '0.001' before its digit group '80'
+GROUP_TAIL = re.compile(r"^\d{1,3}$")
+
+
+def _stack_fractions(words: list[tuple]) -> list[tuple]:
+    """A stacked fraction - a small numerator printed over its small denominator (Shigley's thread sizes) -
+    as one word 'n/d' between them, on the line of its row. Otherwise '3' and '4' are two rows and the size
+    '3/4' is lost."""
+    if len(words) < 2:
+        return words
+    heights = sorted(w[3] - w[1] for w in words)
+    small_h = 0.8 * heights[len(heights) // 2]
+    small = sorted((i for i, w in enumerate(words) if FRACTION_PART.match(w[4]) and w[3] - w[1] < small_h),
+                   key=lambda i: (words[i][1], words[i][0]))
+    taken: set[int] = set()
+    joined: list[tuple] = []
+    for i in small:
+        if i in taken:
+            continue
+        a = words[i]
+        h = a[3] - a[1]
+        for j in small:
+            b = words[j]
+            if j == i or j in taken:
+                continue
+            overlap = min(a[2], b[2]) - max(a[0], b[0])
+            if b[1] > a[1] + 0.4 * h and b[1] - a[3] < 0.5 * h and overlap >= 0.5 * min(a[2] - a[0], b[2] - b[0]):
+                taken |= {i, j}
+                joined.append((min(a[0], b[0]), a[1], max(a[2], b[2]), b[3], f"{a[4]}/{b[4]}"))
+                break
+    return [w for k, w in enumerate(words) if k not in taken] + joined
+
+
+def _digit_groups(ws: list[tuple]) -> list[tuple]:
+    """'0.001 80' printed with a thin space is one number (0.00180), not two cells."""
+    out: list[tuple] = []
+    for w in ws:
+        p = out[-1] if out else None
+        if p and GROUP_HEAD.match(p[4]) and GROUP_TAIL.match(w[4]) and 0 <= w[0] - p[2] < 0.45 * (p[3] - p[1]):
+            out[-1] = (p[0], min(p[1], w[1]), w[2], max(p[3], w[3]), f"{p[4]} {w[4]}")
+        else:
+            out.append(w)
+    return out
+
+
+def _gap_phrases(ws: list[tuple], gap: float) -> list[list[tuple]]:
+    phrases: list[list[tuple]] = []
+    for w in ws:
+        if phrases and w[0] - phrases[-1][-1][2] <= gap:
+            phrases[-1].append(w)
+        else:
+            phrases.append([w])
+    return phrases
+
+
+def _join_heading(parts: list[str]) -> str:
+    """Heading lines of one column read top to bottom: 'Tensile-' + 'Stress' -> 'Tensile-Stress'."""
+    out = ""
+    for p in parts:
+        out = f"{out}{p}" if out.endswith("-") and p[:1].isalpha() else f"{out} {p}".strip()
+    return out
+
+
+def text_tables(page, loc: str, max_tables: int = 8, y_tol: float = 3.2) -> list[Chunk]:
+    """A2 for borderless tables on pages that are not MMPDS allowables pages (Shigley Tables 8-2 and 8-9):
+    find_tables() needs ruling lines and aligned_grid() takes the whole page as one table, so these were lost.
+
+    A data line has at least three phrases (words closer than about one character height) of which at least
+    two are numbers. A table body is three or more data lines in a run, broken by prose, a caption, a
+    contents line or a wide vertical gap; up to two other lines inside it are kept as rows. The heading lines
+    are the multi-phrase lines directly above it, read per column and joined into one heading row, which is
+    how verify_packet reads a column's quantity. Columns are the x-extents the body's phrases occupy. The
+    caption is the 'Table x' line above the headings (with the title lines below it) or below the body."""
+    words = reading_words(page, split_sizes=True)
+    if len(words) < 9:
+        return []
+    words = _stack_fractions(words)
+    heights = sorted(w[3] - w[1] for w in words)
+    h = heights[len(heights) // 2]
+    gap = max(6.0, 1.1 * h)
+    width = max(w[2] for w in words) - min(w[0] for w in words)
+    lines = [(yc, _gap_phrases(_digit_groups(ws), gap)) for yc, ws in _lines(words, y_tol)]
+    text_of = lambda ph: " ".join(w[4] for w in ph)                       # noqa: E731
+
+    def is_data(ph: list[list[tuple]]) -> bool:
+        return (len(ph) >= 3 and sum(1 for p in ph if NUMERIC_PHRASE.match(text_of(p))) >= 2
+                and not any(LEADER_WORD.search(w[4]) for p in ph for w in p))
+
+    def is_prose(ph: list[list[tuple]]) -> bool:
+        return len(ph) == 1 and (len(ph[0]) >= 5 or ph[0][-1][2] - ph[0][0][0] > 0.5 * width)
+
+    data = [is_data(ph) for _, ph in lines]
+    out: list[Chunk] = []
+    i = 0
+    while i < len(lines) and len(out) < max_tables:
+        if not data[i]:
+            i += 1
+            continue
+        last, n_data, j = i, 1, i
+        while j + 1 < len(lines):
+            nxt = j + 1
+            ph = lines[nxt][1]
+            if is_prose(ph) or CAPTION.match(text_of(ph[0])) or lines[nxt][0] - lines[j][0] > 5 * h:
+                break
+            if data[nxt]:
+                last, n_data = nxt, n_data + 1
+            elif nxt - last > 2:
+                break
+            j = nxt
+        start, end = i, last
+        i = last + 1
+        if n_data < 3:
+            continue
+        spans = sorted((p[0][0], p[-1][2]) for k in range(start, end + 1) if data[k] for p in lines[k][1])
+        cols: list[list[float]] = []
+        for x0, x1 in spans:
+            if cols and x0 <= cols[-1][1] + 1.0:
+                cols[-1][1] = max(cols[-1][1], x1)
+            else:
+                cols.append([x0, x1])
+        if len(cols) < 2:
+            continue
+        lo, hi = cols[0][0], cols[-1][1]
+        head = start
+        while head - 1 >= 0 and start - head < 8:
+            ph = lines[head - 1][1]
+            if (is_prose(ph) or CAPTION.match(text_of(ph[0])) or lines[head][0] - lines[head - 1][0] > 3 * h
+                    or (len(ph) == 1 and (len(ph[0]) > 3 or ph[0][0][0] < lo - 30 or ph[0][-1][2] > hi + 30))):
+                break
+            head -= 1
+
+        def place(p: list[tuple], heading: bool) -> list[int]:
+            x0, x1 = p[0][0], p[-1][2]
+            over = [(min(x1, c[1]) - max(x0, c[0]), k) for k, c in enumerate(cols)]
+            hits = [k for ov, k in over if ov > 0]
+            if heading and len(hits) >= 2:
+                return hits                                       # a group heading over several columns
+            if hits:
+                return [max(over)[1]]
+            if heading and (x1 < lo - 10 or x0 > hi + 10):
+                return []                                         # a heading over no data ('Head Marking')
+            xc = (x0 + x1) / 2
+            return [min(range(len(cols)), key=lambda k: abs((cols[k][0] + cols[k][1]) / 2 - xc))]
+
+        heading: list[list[str]] = [[] for _ in cols]
+        for k in range(head, start):
+            for p in lines[k][1]:
+                for c in place(p, True):
+                    heading[c].append(text_of(p))
+        grid = [[_join_heading(parts) for parts in heading]] if head < start else []
+        for k in range(start, end + 1):
+            row = [""] * len(cols)
+            for p in lines[k][1]:
+                for c in place(p, False):
+                    row[c] = f"{row[c]} {text_of(p)}".strip()
+            grid.append(row)
+        if not _plausible_table(grid):
+            continue
+        cap = ""
+        for k in range(head - 1, max(head - 4, -1), -1):
+            if CAPTION.match(text_of(lines[k][1][0])):
+                cap = " ".join(text_of(p) for m in range(k, head) for p in lines[m][1])
+                break
+        else:
+            for k in range(end + 1, min(end + 4, len(lines))):
+                if CAPTION.match(text_of(lines[k][1][0])):
+                    cap = " ".join(text_of(p) for m in range(k, min(k + 2, len(lines))) for p in lines[m][1])
+                    break
+        cap = cap[:300]
+        out.append(Chunk(f"{loc} table {len(out) + 1}", (f"{cap}\n\n" if cap else "") + rows_to_markdown(grid),
+                         has_table=True, quality={"table": {"rows": len(grid), "cols": len(cols),
+                                                            "caption": cap or None, "method": "text"}}))
+    return out
+
+
 def page_tables(page, loc: str, max_tables: int = 8) -> list[Chunk]:
     """A2: tables on a text page -> markdown chunks with caption, locator `<p> table n`.
 
     Material-property pages (Ftu/Fty with ksi/MPa) use the geometry grid (aligned_grid), which keeps
     spanning headers and multi-line header cells; other pages use PyMuPDF's ruled-table detection."""
     txt = page.get_text("text") or ""
+
+    def plausible(g: list[list[str]]) -> bool:
+        return bool(g) and _plausible_table([[c.replace(SPAN_SEP, "") for c in r] for r in g])
+
     if PROPERTY_PAGE.search(txt):
-        grid, cap = aligned_grid(page)
-        if grid and _plausible_table([[c.replace(SPAN_SEP, "") for c in r] for r in grid]):
+        # whether the page is one geometry grid is decided as before (no temper-code columns, words printed
+        # twice kept): with them a page of prose around a ruled table (a design manual printing its text twice)
+        # passed as a grid and lost the table; only turned pages read differently, which is the point
+        grid, cap = aligned_grid(page, code_columns=False, once=False)
+        if plausible(grid):
+            coded, cap2 = aligned_grid(page)
+            if plausible(coded):
+                grid, cap = coded, cap2
             return [Chunk(f"{loc} table 1", (f"{cap}\n\n" if cap else "") + rows_to_markdown(grid), has_table=True,
                           quality={"table": {"rows": len(grid), "cols": len(grid[0]), "caption": cap or None,
                                              "method": "aligned"}})]
     try:
-        found = page.find_tables()
+        # ruled tables only, as PyMuPDF 1.x does: 2.x adds the layout analyser's borderless tables (use_layout),
+        # one row per printed line with stacked fractions apart, which pre-empted text_tables (CI, 2026-11-02)
+        try:
+            found = page.find_tables(strategy="lines", use_layout=False)
+        except TypeError:                                  # PyMuPDF 1.x: no layout analyser
+            found = page.find_tables(strategy="lines")
     except Exception:
         return []
     out: list[Chunk] = []
@@ -234,7 +555,7 @@ def page_tables(page, loc: str, max_tables: int = 8) -> list[Chunk]:
         out.append(Chunk(f"{loc} table {t_i}", (f"{cap}\n\n" if cap else "") + md, has_table=True,
                          quality={"table": {"rows": len(rows), "cols": max(len(r) for r in rows),
                                             "caption": cap or None}}))
-    return out
+    return out or text_tables(page, loc, max_tables)
 
 
 class PdfExtractor(Extractor):

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 import hashlib
 import importlib
 import importlib.metadata
@@ -36,14 +37,18 @@ import re
 import subprocess
 import sys
 import threading
-import unicodedata
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
 from . import __version__, safeio
-from .config import AGENT_ROOT, ConfigError, check_policy, load_config, protocol_dir, validate_config
+from .config import AGENT_ROOT, ConfigError, ConfigFormatError, check_policy, load_config, protocol_dir, validate_config
 from .edition import render
+# the one injection detector (G4.1, G4.2), shared with the plugin's PostToolUse hook on fetched web pages
+from .injection import INJECTION_RE
+from .injection import visible as _visible
 from .models import IndexJobStatus
 from .safeio import TOOLS_SHIPPED
 from .disciplines import info as disciplines_info
@@ -51,23 +56,6 @@ from .specialists import SPECIALISTS, installed
 
 PROTOCOL_FILES = ["guardrails.md", "rules_and_guidelines.md", "ERLA.md", "instructions.md",
                   "skills.md", "MCP_MODE.md", *(s["skills"] for s in SPECIALISTS.values())]
-INJECTION_RE = re.compile(
-    r"ignore (?:all |any |the )?(?:previous|prior|above|earlier) (?:instructions|prompts?)|"
-    r"disregard (?:the |all )?(?:previous|prior|system|above)|you are now (?:a|an|in)\b|"
-    r"new instructions\s*:|system prompt|<\s*/?\s*(?:system|assistant|instructions?)\s*>|"
-    r"(?:send|upload|email|post) (?:this|the|these) (?:file|document|data)s? to|exfiltrat|"
-    # polite and indirect forms (integrity attacks, 0.3.6): text addressed to the model, secrecy
-    # requests, standing orders, chat-template tokens, tool names, and calls to open a URL
-    r"(?:note|message|instructions?|guidance)\s+(?:to|for)\s+(?:the\s+|any\s+)?(?:ai|assistant|model|llm|chatbot|agent)\b|"
-    r"\b(?:ai|assistant|model|llm|agent)\s+(?:reading|processing|summari[sz]ing|parsing)\s+this\b|"
-    r"from now on,?\s+(?:you|always|never|report|answer)\b|"
-    r"\b(?:do not|don't|never)\s+(?:mention|tell|reveal|disclose|show)\b[^.\n]{0,40}\b(?:user|note|instruction)s?\b|"
-    r"\bwhen (?:you are )?asked (?:about|for)\b|"
-    r"<\|im_(?:start|end)\|>|\[/?INST\]|<<\s*/?SYS\s*>>|^\s*(?:assistant|ai)\s*:|"   # not "System:", a common label
-    r"<!--[^>]{0,200}?\b(?:assistant|ai|model|llm|instruction)|"
-    r"\b(?:export_packet|web_?fetch|web_?search|library_show|verify_packet|log_request)\b|"
-    r"\b(?:after|then|also)\b[^.\n]{0,60}\b(?:open|visit|fetch|call|load|send|post)\b[^.\n]{0,40}https?://|"
-    r"https?://\S*[?&]\w+=(?:\{|<|\$|USER|QUESTION|QUERY|PROMPT)", re.I | re.M)
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _LOCK = threading.RLock()
 STARTUP_NOTES: list[str] = []
@@ -120,30 +108,67 @@ def _capture(fn, *args) -> str:
     return buf.getvalue()
 
 
-def _guard(fn):
-    """Serialise tool calls, keep stray output off the protocol, turn errors into results."""
+_REQUEST_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("erla_request_id", default=None)
+TOOL_LOG = "tool_calls.jsonl"     # one line per MCP tool call (kept apart from retrieval_log.jsonl's records)
+
+
+def _request_id() -> str | None:
+    """The id of the tool call being served (written into the mcp.search and mcp.verify records)."""
+    return _REQUEST_ID.get()
+
+
+def _log_call(tool: str, request_id: str, duration_ms: float, outcome: str, error_type: str | None) -> None:
+    """One structured line per tool call: tool, request_id, duration_ms, outcome, error_type. No arguments and
+    no result text, so the log gains no library content or query text. Token counts and cost are not logged:
+    the MCP server never sees the model's tokens (the client does), so they cannot be measured here."""
+    from .report import append_log
+    try:
+        cfg = _cfg()
+    except (ConfigError, OSError):        # no site yet (install, first start): nowhere to log
+        return
+    try:
+        append_log(cfg, {"cmd": "mcp.tool", "tool": tool, "request_id": request_id,
+                         "duration_ms": round(duration_ms, 1), "outcome": outcome, "error_type": error_type},
+                   TOOL_LOG)
+    except (OSError, ValueError):   # the log is an aid: a failed write (incl. a G1 refusal) never fails a call
+        pass
+
+
+def _guard(fn, tool: str | None = None):
+    """Serialise tool calls, keep stray output off the protocol, turn errors into results, and log each call
+    (request_id, duration, outcome) to logs/tool_calls.jsonl."""
     import functools
+    name = tool or fn.__name__.removeprefix("t_")
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         with _LOCK:
+            rid = uuid.uuid4().hex[:16]
+            token = _REQUEST_ID.set(rid)
+            t0 = time.perf_counter()
+            outcome, etype = "ok", None
             sink = io.StringIO()
             try:
                 with contextlib.redirect_stdout(sink):
-                    return fn(*args, **kwargs)
+                    result = fn(*args, **kwargs)
+                if isinstance(result, dict) and "error" in result:   # a refusal or bad input, returned
+                    outcome, etype = "error", "tool_error"
+                return result
+            except ConfigFormatError as exc:     # a picker would not fix a typo in the file
+                outcome, etype = "error", "ConfigFormatError"
+                return {"error": str(exc), "fix": "tell the user to correct the named setting in their "
+                                                  "library_config.yaml"}
             except ConfigError as exc:
+                outcome, etype = "error", "ConfigError"
                 return {"error": str(exc), "fix": "call add_library_folders() - it opens a folder picker on the "
                                                   "user's screen"}
             except Exception as exc:  # noqa: BLE001 - report, never crash the server
+                outcome, etype = "error", type(exc).__name__
                 return {"error": f"{type(exc).__name__}: {exc}"}
+            finally:
+                _REQUEST_ID.reset(token)
+                _log_call(name, rid, (time.perf_counter() - t0) * 1000, outcome, etype)
     return wrapper
-
-
-def _visible(text: str) -> str:
-    """Document text as a reader sees it: NFKC, without zero-width and other invisible format
-    characters ("ig​nore previous instructions" must still match)."""
-    t = unicodedata.normalize("NFKC", text)
-    return "".join(ch for ch in t if unicodedata.category(ch) != "Cf")
 
 
 def _anomalies(source: str, items: list[tuple[str, str]]) -> list[dict]:
@@ -214,6 +239,25 @@ def _runtime_mismatch() -> dict | None:
                          f"Until then the tools behave as {__version__}."}
 
 
+def _editable_install() -> bool:
+    """ERLA is installed in development mode (``pip install -e``): the package runs from the source tree and its
+    recorded version is the one at install time, so a version bump alone makes ``_runtime_mismatch`` report one
+    (2026-11-02: the dev venv recorded 0.5.10 while the source was 0.7.2). That is not another runtime, so
+    index_start does not refuse for it; the plugin runtime and other regular installs are never editable."""
+    try:
+        dist = importlib.metadata.distribution("erla")
+        raw = dist.read_text("direct_url.json")
+        if raw and json.loads(raw).get("dir_info", {}).get("editable"):
+            return True
+        # a setuptools develop install leaves erla.egg-info in the source tree, found first from the checkout
+        # (2026-11-02: a stale one recorded 0.5.10): metadata inside the tree this code runs from is no runtime
+        src = Path(__file__).resolve().parent.parent
+        meta = Path(str(dist.locate_file(""))).resolve()
+        return meta == src and (src / "pyproject.toml").is_file() and (src / "erla.egg-info").is_dir()
+    except (importlib.metadata.PackageNotFoundError, ValueError, AttributeError, TypeError, OSError):
+        return False
+
+
 # -------------------------------------------------------------- tool bodies
 def t_site_info() -> dict:
     from .site import review_status
@@ -237,8 +281,9 @@ def t_site_info() -> dict:
         cfg = load_config(validate=False)
     except ConfigError as exc:
         info.update({"configured": False, "error": str(exc),
-                     "next_step": "tell the user a folder picker is opening on their screen, then call "
-                                  "add_library_folders()"})
+                     "next_step": "tell the user to correct the named setting in their library_config.yaml"
+                     if isinstance(exc, ConfigFormatError) else
+                     "tell the user a folder picker is opening on their screen, then call add_library_folders()"})
         if STARTUP_PICK.get("state", "idle") != "idle":
             info["startup_picker"] = {k: v for k, v in STARTUP_PICK.items() if k != "result"}
         return info
@@ -327,7 +372,12 @@ def _startup_pick_worker() -> None:
     job = _auto_first_index()
     STARTUP_PICK.update(state="added", picked=picked, result=res, index_job=job, finished=_now())
     STARTUP_NOTES.append(f"library folder(s) chosen in the startup folder picker: {picked}. "
-                         f"{_summary(res)}." + (" First index started automatically." if job else ""))
+                         f"{_summary(res)}." + (" First index started automatically." if _started(job) else ""))
+
+
+def _started(job: dict | None) -> bool:
+    """An index_start result that started a job (not a refusal such as runtime_mismatch, G10.3)."""
+    return bool(job and job.get("started"))
 
 
 def _auto_first_index() -> dict | None:
@@ -365,8 +415,8 @@ def _startup_pick_result() -> dict | None:
     job = STARTUP_PICK.get("index_job")
     return {"added": True, "via": "startup folder picker", "summary": _summary(res), **res,
             "index_job": job,
-            "next_step": ("first index started automatically; poll index_status" if job else
-                          "run index_start to index the added folder(s)")}
+            "next_step": ("first index started automatically; poll index_status" if _started(job) else
+                          (job or {}).get("next_step") or "run index_start to index the added folder(s)")}
 
 
 def t_add_library_folders(paths: list[str] | None = None) -> dict:
@@ -400,8 +450,8 @@ def t_add_library_folders(paths: list[str] | None = None) -> dict:
         return {"added": False, "error": str(exc)}
     job = _auto_first_index()
     return {"added": True, "summary": _summary(res), **res, "index_job": job,
-            "next_step": ("first index started automatically; poll index_status" if job else
-                          "run index_start to index the added folder(s)")}
+            "next_step": ("first index started automatically; poll index_status" if _started(job) else
+                          (job or {}).get("next_step") or "run index_start to index the added folder(s)")}
 
 
 def _add_library_folders_tool(paths: list[str] | None = None) -> dict:
@@ -497,7 +547,8 @@ def t_library_search(query: str, k: int = 20, types: list[str] | None = None, ti
     for i, h in enumerate(hd, 1):
         h["source_id"] = f"S{i}"
         anomalies += _anomalies(f"doc {h['doc_id']}", list(zip(h.get("locators", []), h.get("snippets", []))))
-    report.append_log(cfg, {"cmd": "mcp.search", "query": query, "sub_queries": subs, "intent": intent,
+    report.append_log(cfg, {"cmd": "mcp.search", "request_id": _request_id(), "query": query,
+                            "sub_queries": subs, "intent": intent,
                             "expanded": exp.describe(), "mode": mode, "evidence": ev["verdict"],
                             "k": k, "returned": [h["doc_id"] for h in hd],
                             "flags": sorted({h["flag"] for h in hd if h.get("flag")})})
@@ -687,9 +738,25 @@ def t_verify_packet(items: list[dict]) -> dict:
                                                    out["items"], out["verification_id"])
     except Exception as exc:             # the memory is an aid: a failed write never fails a verification
         out["remembered_error"] = type(exc).__name__
-    report.append_log(cfg, {"cmd": "mcp.verify", "overall": out["overall"], "verification_id": out["verification_id"],
+    from . import packetgate, store      # the gate export_packet and log_request apply (F-03)
+    packetgate.register(out["verification_id"], [i if isinstance(i, dict) else {} for i in items], out["items"],
+                        store.get_meta(con, "last_index_at"))
+    report.append_log(cfg, {"cmd": "mcp.verify", "request_id": _request_id(), "overall": out["overall"],
+                            "verification_id": out["verification_id"],
                             **{f"n_{k.lower()}": v for k, v in out["counts"].items()}})
     return out
+
+
+def _index_stamp(cfg) -> str | None:
+    """The index state a verification was made against (``last_index_at``); None when there is no index."""
+    from . import store
+    if not cfg.index_path.is_file():
+        return None
+    con = store.connect(cfg.index_path)
+    try:
+        return store.get_meta(con, "last_index_at")
+    finally:
+        con.close()
 
 
 def calc_tool(tool: str):
@@ -725,21 +792,37 @@ def t_log_request(record: dict) -> dict:
     # A packet that declares it reports no values (a not-found answer, L8) has nothing to verify: null,
     # not false. Anything else without an id stays false (fail closed: a missing, non-integer or
     # non-zero count, or a bool).
+    # F-03: a record that reports values (values_reported > 0) is refused unless its verification_id was issued
+    # by this server's verify_packet against the current index and its PASS / COMPUTED items cover the values
+    # (erla.packetgate). verified then says whether every reported value passed. A record without a count keeps
+    # the old marking, but an id this server did not issue no longer counts as verified.
+    from . import packetgate
     n = record.get("values_reported")
-    if record.get("verification_id"):
-        verified: bool | None = True
-    elif type(n) is int and n == 0:
-        verified = None
+    ids = packetgate.ids_of(record.get("verification_id"))
+    gated: dict[str, Any] = {}
+    if type(n) is int and n == 0:
+        verified: bool | None = True if ids else None
+    elif type(n) is int and n > 0:
+        verified = None                      # set by the gate below, after the check policy
     else:
-        verified = False
+        verified = packetgate.known(ids)
     from . import checkgate
     cfg = _cfg()
     try:                     # the user's check policy (ADR-0002 Phase 3): no check, no log - fail closed
         check = checkgate.gate(cfg, checkgate.needs_check_record(cfg, record), str(record.get("check_id") or ""),
-                               str(record.get("unchecked_reason") or ""), record.get("outcome") == "unresolved")
+                               str(record.get("unchecked_reason") or ""), record.get("outcome") == "unresolved",
+                               verified=packetgate.examined_values(ids))     # F-36: the check of this packet
     except checkgate.CheckError as exc:
         return {"error": str(exc), "check_policy": check_policy(cfg)}
-    rec = {"cmd": "agent", **record, "verified": verified, **check}   # check fields come from the record on disk
+    if type(n) is int and n > 0:
+        try:
+            gated = packetgate.check_record(record, _index_stamp(cfg))
+        except packetgate.GateError as exc:
+            return {"error": str(exc), "fix": packetgate.FIX}
+        verified = gated.pop("verified")
+    elif ids and not verified and type(n) is not int:
+        gated = {"verification_unknown": [i for i in ids if not packetgate.known([i])]}
+    rec = {"cmd": "agent", **record, "verified": verified, **gated, **check}   # check fields come from the record on disk
     return {"logged_to": str(append_log(cfg, rec)), **check}
 
 
@@ -807,14 +890,18 @@ def t_record_lesson(specialist: str, kind: str, lesson: str, evidence: str = "",
 
 
 def t_export_packet(name: str, markdown: str, csv_text: str = "", check_id: str = "",
-                    unchecked_reason: str = "") -> dict:
-    from . import checkgate
+                    unchecked_reason: str = "", verification_id: str = "") -> dict:
+    from . import checkgate, packetgate
     cfg = _cfg()
     try:                     # same policy gate as log_request (ADR-0002 Phase 3)
         check = checkgate.gate(cfg, checkgate.needs_check_text(cfg, markdown), check_id, unchecked_reason,
-                               "UNRESOLVED" in markdown)
+                               "UNRESOLVED" in markdown, packet_text=f"{markdown}\n{csv_text}")   # F-36
     except checkgate.CheckError as exc:
         return {"error": str(exc), "check_policy": check_policy(cfg)}
+    try:                     # F-03: every reported value is a PASS / COMPUTED item of a verification of this packet
+        gated = packetgate.check_export(markdown, csv_text, verification_id, _index_stamp(cfg))
+    except packetgate.GateError as exc:
+        return {"error": str(exc), "fix": packetgate.FIX}
     stem = SAFE_NAME.sub("_", name).strip("._")[:80] or "result_packet"
     if SAFE_NAME.search(name) or (cfg.out_dir / f"{stem}.md").exists():
         # names that differ only in characters dropped here ("σ_max lug", "τ_max lug") or an earlier export
@@ -824,13 +911,25 @@ def t_export_packet(name: str, markdown: str, csv_text: str = "", check_id: str 
         base, n = stem, 2
         while (cfg.out_dir / f"{stem}.md").exists():
             stem, n = f"{base}_{n}", n + 1
+    # G6.1: the exported packet always states that ERLA does not certify (added when the packet lacks it)
+    markdown, notice_added = packetgate.with_certification_notice(markdown)
     written = [str(safeio.write_text(cfg, cfg.out_dir / f"{stem}.md", markdown))]
     if csv_text:
         written.append(str(safeio.write_text(cfg, cfg.out_dir / f"{stem}.csv", csv_text)))
-    return {"written": written, **check}
+    return {"written": written, **gated, **check, **({"certification_notice_added": True} if notice_added else {})}
 
 
 def t_index_start(full: bool = False, confirm: bool = False, embed: bool = True, ocr: bool = False) -> dict:
+    # G10.3: only the active version runs index-writing jobs. While site_info reports runtime_mismatch this
+    # server is an older (or newer) runtime than the one installed, so it starts no job (production loop F-42)
+    mismatch = _runtime_mismatch()
+    if mismatch is not None and not _editable_install():
+        return {"error": f"index job refused: this server runs ERLA {mismatch['running']} but ERLA "
+                         f"{mismatch['installed']} is installed (G10.3: only the active version writes the index)",
+                "runtime_mismatch": mismatch,
+                "next_step": "tell the user to quit and reopen the Claude app (in a terminal, restart `claude`) so "
+                             f"the server runs ERLA {mismatch['installed']}; /reload-plugins and /mcp Reconnect do "
+                             "not restart it. Then call index_start again."}
     cfg = _cfg()
     status_p, log_p = _job_paths(cfg)
     prior = _read_job_status(status_p)
@@ -883,7 +982,16 @@ def t_run_eval() -> dict:
     from . import cli
     ns = argparse.Namespace(golden=None, no_vector=False, no_rerank=False, reranker=None, memory=False,
                             intent=None, save=None, compare=None)
-    return {"text": _capture(cli.cmd_eval, ns)}
+    text = _capture(cli.cmd_eval, ns)
+    out: dict[str, Any] = {"text": text}
+    try:                     # F-14: the paired comparison with the last recorded run (evaluate.compare_last)
+        res = json.loads(text)
+    except ValueError:       # cmd_eval printed an error instead of a run
+        return out
+    cmp = res.get("compare_last") if isinstance(res, dict) else None
+    out["compare"] = cmp
+    out["regression"] = bool(cmp and cmp.get("regression"))
+    return out
 
 
 def t_protocol_status() -> dict:
@@ -969,7 +1077,7 @@ def build_server():
     wr = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
 
     def reg(fn, name, desc, ann):
-        srv.add_tool(_guard(fn), name=name, description=desc, annotations=ann)
+        srv.add_tool(_guard(fn, name), name=name, description=desc, annotations=ann)
 
     spec_on = installed()                          # the free core edition installs no specialists
 
@@ -1030,8 +1138,9 @@ def build_server():
         "any other factor with the equation it comes from) "
         "or, when no tool applies, not_covered with the reason (listed as COMPUTED, not checked); a computed value with "
         "neither FAILS. Returns per-item PASS/FAIL/UNCONFIRMED/COMPUTED with evidence and OCR/flag warnings, and a "
-        "verification_id for log_request. UNCONFIRMED: the number is on the page but no property record or table "
-        "row confirms the row or column claimed for it - not verified.", ro)
+        "verification_id for log_request and export_packet, which refuse a packet that reports values without "
+        "one issued by this server for those values. UNCONFIRMED: the number is on the page but no property "
+        "record or table row confirms the row or column claimed for it - not verified.", ro)
     for spec in spec_on.values():           # names and descriptions live in the specialist modules
         if spec.get("tool"):                # a discipline may have no calculation tool (programming)
             reg(calc_tool(spec["tool"]), spec["tool"], spec["description"], ro)
@@ -1044,15 +1153,25 @@ def build_server():
     reg(t_source_tier, "source_tier", "Authority tier (T1-T6) for a web URL.", ro)
     reg(t_log_request, "log_request", "Append the request summary to the retrieval log (rules R7.1). "
         "record: {query, scope, sources, budget, flags, verification_id, values_reported}. "
-        "values_reported = number of values the packet reports (0 for a not-found answer); a packet "
-        "without verification_id is logged as unverified unless values_reported is 0. When the user's check "
+        "values_reported = number of values the packet reports (0 for a not-found answer). With "
+        "values_reported > 0 the record is refused unless verification_id (one id, or a list) was returned by "
+        "verify_packet in this server session, against the current index, "
+        "with PASS or COMPUTED items for at least values_reported - values_unverified values. After correcting "
+        "a FAIL or UNCONFIRMED item, call verify_packet on the final packet's items and cite that run: a record "
+        "with values_unverified 0 that cites a run that did not pass is refused; "
+        "values_unverified = values the packet reports as NOT VERIFIED (default 0). verified is true only when "
+        "every reported value passed. A record without values_reported is logged as unverified unless its "
+        "verification_id passed. When the user's check "
         "policy requires an independent check (site_info.check_policy; instructions W9), add check_id (a "
-        "closed check) or unchecked_reason; otherwise the request is refused. Optional: discipline, "
+        "closed check of this packet: its checked values must be values of the verification named) or "
+        "unchecked_reason starting with an allowed reason ('no values', 'user declined', 'no checker', "
+        "'check policy off'); otherwise the request is refused. Optional: discipline, "
         "skills_loaded, calc_ids, design_value.", wr)
     reg(t_check_open, "check_open", "Lead only (instructions W9): open an independent check of a draft "
         "packet - {question, inputs, sources, method, discipline, quantities: [{name, value, units, calc_id, "
         "source}], assumptions, conclusion}; a conclusion to compare (critical / not critical, separates / does "
-        "not) is a quantity with units 'decision' and its label as value. For a margin, design value or "
+        "not) is a quantity with units 'decision', its label as value and options: the list of conclusions "
+        "the checker chooses from (at least two, the value among them). For a margin, design value or "
         "program also coverage: [{configuration, mode, status (COMPUTED / NOT CHECKED / REQUIRED INPUT), source, "
         "reason}] (rules R4.7) and reports_margins: true. rework_of: the closed check this "
         "reworks (at most 2 rework rounds per stage); escalate_from: a closed Opus check that did not converge "
@@ -1061,7 +1180,8 @@ def build_server():
         "computed comparison and the findings (for Result Packet section G).", ro)
     reg(t_check_estimate, "check_estimate", "Professor only: record your own estimate of every quantity "
         "[{name, value, units, method}] or [{name, not_checked: reason}] before the lead's values are "
-        "revealed.", wr)
+        "revealed; for a 'decision' quantity the value is one of the options brief_part1 lists, as written, and "
+        "the reasoning goes in method.", wr)
     reg(t_check_reveal, "check_reveal", "Professor only: after check_estimate, reveal the lead's values, "
         "assumptions and conclusion with the comparison computed by code (within 2 % agrees, 2-5 % explain, "
         "over 5 % out of tolerance).", wr)
@@ -1085,14 +1205,25 @@ def build_server():
         "logs/lessons.jsonl and opens a review trigger; the skill file changes only through the protocol "
         "review after the user approves (rules section 9).", wr)
     reg(t_export_packet, "export_packet", "Write a Result Packet (markdown, optional CSV of values) to "
-        "the site out/ folder (rules section 8). Never writes elsewhere. When the user's check policy "
-        "requires an independent check, pass check_id (a closed check) or unchecked_reason.", wr)
+        "the site out/ folder (rules section 8). Never writes elsewhere. A packet that reports values (a number "
+        "in section B's Value column or the CSV's value column, or in the answer unless it is NOT FOUND or "
+        "UNRESOLVED) needs verification_id from verify_packet in this server session: each such number must be "
+        "a PASS or COMPUTED item of it, at the row's Locator when the row gives one; a row marked NOT VERIFIED "
+        "is exempt. When the user's check policy requires an independent check, pass check_id (a closed check "
+        "of this packet: every value it checked appears in the packet, e.g. in section G) or unchecked_reason "
+        "starting with an allowed reason ('no values', 'user declined', 'no checker', 'check policy off'). The "
+        "written packet always carries the G6.1 statement that ERLA does not certify designs (added under the "
+        "title when missing; certification_notice_added says so).", wr)
     reg(t_index_start, "index_start", "Start the background refresh job: index, deferred OCR, PDF table "
         "backfill and embeddings (same chain as erla refresh, one at a time via logs/refresh.lock). The first "
         "index starts automatically once a library is configured; a full re-index requires confirm=true "
-        "after the user approves (G8.1).", wr)
+        "after the user approves (G8.1). Refused while site_info reports runtime_mismatch (G10.3): the app "
+        "must be restarted first.", wr)
     reg(t_index_status, "index_status", "Progress of the background index job.", ro)
-    reg(t_run_eval, "run_eval", "Run the golden-query evaluation (Recall@5/10, MRR).", wr)
+    reg(t_run_eval, "run_eval", "Run the golden-query evaluation (Recall@5/10, MRR, nDCG@10) and compare it, "
+        "question by question, with the last recorded run on the same golden set: compare gives each metric's "
+        "paired delta with its 95% interval, regression is true when an interval lies wholly below 0, "
+        "settings_changed names settings that differ from that run. Records the run under logs/.", wr)
     reg(t_site_resurvey, "site_resurvey", "Re-measure the library and rewrite SITE_NOTES.md.", wr)
     srv.add_tool(_add_library_folders_tool, name="add_library_folders", annotations=wr, description=
         "Add engineering library folder(s) on this computer "

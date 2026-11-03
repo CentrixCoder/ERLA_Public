@@ -96,6 +96,45 @@ class ConfigError(ValueError):
     """Raised when the configuration is missing or invalid."""
 
 
+class ConfigFormatError(ConfigError):
+    """The site config exists but a key or value in it is malformed (an unknown key, a section that is not a
+    mapping, a number that is not one). Not "no library on this computer": callers that fall back to a
+    no-library mode on ConfigError (the web gate) must not do so for this one."""
+
+
+# Every top-level key of library_config.yaml: the ones load_config reads, and protocol_review (written by
+# `erla init`, read by the protocol review). Loading rejects any other key: `unit_sytem: SI` loaded silently
+# and left the site on US units (2026-11-02).
+SECTIONS = ("ocr", "legacy_office", "embeddings", "tables", "rerank", "search", "sparse", "refs", "web", "check",
+            "protocol_review")
+KNOWN_KEYS = frozenset({"library_roots", "agent_root", "index_path", "out_dir", "log_dir", "web_cache_dir",
+                        "include_ext", "exclude_globs", "max_file_mb", "large_library_gb", "stale_days",
+                        "unit_system", "workers", "classification_path_rules", *SECTIONS})
+
+
+def _check_keys(raw: dict[str, Any], cfg_path: Path) -> None:
+    import difflib
+    problems = []
+    for key in raw:
+        if key in KNOWN_KEYS:
+            continue
+        near = difflib.get_close_matches(str(key), sorted(KNOWN_KEYS), n=1)
+        problems.append(f"unknown setting '{key}'" + (f" (did you mean '{near[0]}'?)" if near else ""))
+    for key in SECTIONS:
+        value = raw.get(key)
+        if value is not None and not isinstance(value, dict):
+            problems.append(f"'{key}' must be a section of settings (key: value lines), got {value!r}")
+    if problems:
+        raise ConfigFormatError(f"{'; '.join(problems)} in {cfg_path}: fix or remove it")
+
+
+def _number(kind: type[int] | type[float], value: Any, key: str, cfg_path: Path) -> Any:
+    try:
+        return kind(value)
+    except (TypeError, ValueError):
+        raise ConfigFormatError(f"'{key}' must be a number, got {value!r} in {cfg_path}") from None
+
+
 class ReadOnlyViolation(PermissionError):
     """Raised when code attempts to write inside a library root (guardrail G1.1)."""
 
@@ -213,6 +252,9 @@ def load_config(path: Path | str | None = None, validate: bool = True) -> Config
     if not cfg_path.is_file():
         raise ConfigError(f"No library configured on this computer (no {cfg_path}).\n{SETUP_HINT}")
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ConfigFormatError(f"{cfg_path} must hold settings (key: value lines), got {type(raw).__name__}")
+    _check_keys(raw, cfg_path)
 
     roots = raw.get("library_roots") or []
     if not isinstance(roots, list) or not roots:
@@ -231,24 +273,24 @@ def load_config(path: Path | str | None = None, validate: bool = True) -> Config
         web_cache_dir=_path(raw.get("web_cache_dir", agent_root / "web_cache"), "web_cache_dir"),
         include_ext=include_extensions(raw.get("include_ext")),
         exclude_globs=[str(g) for g in raw.get("exclude_globs", [])],
-        max_file_mb=float(raw.get("max_file_mb", 500)),
-        large_library_gb=float(raw.get("large_library_gb", 50)),
-        stale_days=int(raw.get("stale_days", 7)),
+        max_file_mb=_number(float, raw.get("max_file_mb", 500), "max_file_mb", cfg_path),
+        large_library_gb=_number(float, raw.get("large_library_gb", 50), "large_library_gb", cfg_path),
+        stale_days=_number(int, raw.get("stale_days", 7), "stale_days", cfg_path),
         unit_system=str(raw.get("unit_system", "US")).upper(),
-        workers=int(raw.get("workers", 4)),
+        workers=_number(int, raw.get("workers", 4), "workers", cfg_path),
         ocr=OcrConfig(
             enabled=bool(o.get("enabled", False)),
             tesseract_cmd=Path(o["tesseract_cmd"]) if o.get("tesseract_cmd") else None,
-            dpi=int(o.get("dpi", 300)),
+            dpi=_number(int, o.get("dpi", 300), "ocr.dpi", cfg_path),
             lang=str(o.get("lang", "eng")),
-            max_pages=int(o.get("max_pages", 0)),
-            min_chars_per_page=int(o.get("min_chars_per_page", 50)),
+            max_pages=_number(int, o.get("max_pages", 0), "ocr.max_pages", cfg_path),
+            min_chars_per_page=_number(int, o.get("min_chars_per_page", 50), "ocr.min_chars_per_page", cfg_path),
             triage=bool(o.get("triage", True)),
-            text_dpi=int(o.get("text_dpi", 200)),
-            blank_ink=float(o.get("blank_ink", 0.001)),
-            escalate_conf=float(o.get("escalate_conf", 70.0)),
-            table_digit_ratio=float(o.get("table_digit_ratio", 0.25)),
-            low_conf_numeric=float(o.get("low_conf_numeric", 80.0)),
+            text_dpi=_number(int, o.get("text_dpi", 200), "ocr.text_dpi", cfg_path),
+            blank_ink=_number(float, o.get("blank_ink", 0.001), "ocr.blank_ink", cfg_path),
+            escalate_conf=_number(float, o.get("escalate_conf", 70.0), "ocr.escalate_conf", cfg_path),
+            table_digit_ratio=_number(float, o.get("table_digit_ratio", 0.25), "ocr.table_digit_ratio", cfg_path),
+            low_conf_numeric=_number(float, o.get("low_conf_numeric", 80.0), "ocr.low_conf_numeric", cfg_path),
         ),
         legacy_office=raw.get("legacy_office") or {},
         embeddings=raw.get("embeddings") or {},
@@ -288,6 +330,10 @@ def validate_config(cfg: Config) -> list[str]:
     allow = cfg.web.get("allow_terms")
     if allow is not None and not (isinstance(allow, list) and all(isinstance(t, str) for t in allow)):
         out.append("WARN: web.allow_terms must be a list of terms; it is ignored (edit it with erla web-allow)")
+    for cap in ("max_searches", "max_fetches"):        # G8.2: a malformed cap is ignored, so 15 applies
+        v = cfg.web.get(cap)
+        if v is not None and not (type(v) is int and v >= 1):
+            out.append(f"WARN: web.{cap} must be a whole number of at least 1; got {v!r}, so 15 applies")
     pol = cfg.check.get("policy")
     if pol is not None and pol not in CHECK_POLICIES:
         out.append(f"WARN: check.policy must be one of {', '.join(CHECK_POLICIES)}; got {pol!r}, so 'auto' applies "

@@ -30,9 +30,10 @@ RANGES = {
     ("Ec", "msi"): (0.1, 70), ("G", "msi"): (0.05, 30), ("G", "GPa"): (0.3, 200),
     ("density", "lb/in3"): (0.01, 0.9), ("density", "g/cm3"): (0.3, 25), ("density", "kg/m3"): (300, 25000),
     ("elongation", "%"): (0, 100), ("poisson", ""): (0.0, 0.5),
-    ("KIc", "ksi√in"): (1, 250), ("KIc", "MPa√m"): (1, 275), ("Kt", ""): (1.0, 20.0), ("Kf", ""): (1.0, 20.0),
+    ("KIc", "ksi√in"): (1, 250), ("KIc", "MPa√m"): (1, 275), ("Kc", "ksi√in"): (1, 400), ("Kc", "MPa√m"): (1, 440),
+    ("Sp", "ksi"): (1, 350), ("Sp", "MPa"): (7, 2400), ("Kt", ""): (1.0, 20.0), ("Kf", ""): (1.0, 20.0),
 }
-UNIT_KEY = {"ksi": "ksi", "MPa": "MPa", "N/mm2": "MPa", "msi": "msi", "Msi": "msi", "GPa": "GPa",
+UNIT_KEY = {"ksi": "ksi", "kpsi": "ksi", "MPa": "MPa", "N/mm2": "MPa", "msi": "msi", "Msi": "msi", "GPa": "GPa",
             "lb/in3": "lb/in3", "lb/in^3": "lb/in3", "lb/in³": "lb/in3", "g/cm3": "g/cm3", "g/cc": "g/cm3",
             "kg/m3": "kg/m3", "%": "%", "ksi√in": "ksi√in", "ksi-in1/2": "ksi√in", "MPa√m": "MPa√m",
             "": "", None: ""}

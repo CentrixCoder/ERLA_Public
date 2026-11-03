@@ -373,5 +373,41 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
         for m in ("recall@10", "mrr", "ndcg@10"):
             if isinstance(result.get(m), (int, float)) and isinstance(prev.get(m), (int, float)):
                 result[f"delta_{m}"] = round(result[m] - prev[m], 3)
-    safeio.append_text_at(hist, json.dumps({k: v for k, v in result.items() if k != "rows"}) + "\n")
+    result["compare_last"] = compare_last(cfg, result)
+    safeio.append_text_at(hist, json.dumps({k: v for k, v in result.items() if k not in ("rows", "compare_last")})
+                          + "\n")
     return result
+
+
+RUNS = "eval_runs.jsonl"   # each recorded run reduced by evidence_run (no query text, no titles), for compare_last
+
+
+def compare_last(cfg: Config, result: dict) -> dict:
+    """Pair this run with the last recorded run on the same golden set (golden_sha256) and save this one for the
+    next comparison (logs/eval_runs.jsonl). `regression`: some metric's paired 95% interval lies wholly below 0;
+    an interval that spans 0 is no change. `settings_changed` names what differs from the base run, since a
+    settings change, not only a code change, moves the scores."""
+    run = evidence_run(result)
+    if not run.get("golden_sha256") or not run.get("rows"):
+        return {"base": None, "note": "this run has no golden set hash or no rows; not saved for comparison"}
+    path = safeio.check(cfg, Path(cfg.log_dir) / RUNS)
+    prev = None
+    if path.is_file():
+        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+            try:
+                rec = json.loads(line) if line.strip() else None
+            except ValueError:            # a torn line is skipped, never the reason a run is not compared
+                continue
+            if isinstance(rec, dict) and rec.get("golden_sha256") == run["golden_sha256"]:
+                prev = rec
+                break
+    safeio.append_text_at(path, json.dumps(run, default=str) + "\n")
+    if prev is None:
+        return {"base": None, "note": "no earlier recorded run on this golden set; this run is saved for the next one"}
+    cmp = compare_runs(prev, run)
+    regressed = [m for m in METRICS if isinstance(cmp.get(m), dict) and cmp[m].get("ci95")
+                 and cmp[m]["ci95"][1] < 0]
+    changed = sorted(k for k in ("settings", "hybrid", "reranker", "intent", "methods")
+                     if prev.get(k) != run.get(k))
+    return {"base": prev.get("ts"), **cmp, "regression": bool(regressed), "regressed": regressed,
+            "settings_changed": changed}

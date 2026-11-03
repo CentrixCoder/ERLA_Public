@@ -38,7 +38,9 @@ table value whose claimed context (conditions, material or row) no property reco
 confirms - the table was not extracted, the column heading is ambiguous, or the claim names a column
 heading the rows do not carry - is UNCONFIRMED, never PASS; so is a material property (Ftu, Fty, E, ...)
 read from a table the extractor could not read. UNCONFIRMED is not verified: the overall result is not
-PASS.
+PASS. Such an item carries ``fix`` and ``labels_found`` (2026-11-02): where the claimed words not printed in the
+value's row are printed instead (its column heading, another heading, the caption, a footnote) and the table's
+labels, so the claim can be resubmitted in the row's own words. They never change a status.
 
 Locators resolve as in ``library_show``: exact match, else prefix. A value found only in the chunk
 next to the cited one passes with a warning naming where it is (``found_at``).
@@ -65,7 +67,7 @@ RULE = ("Report as verified only items with status PASS. FAIL: correct the value
         "again, or report the value as NOT VERIFIED; never report it as sourced (G3.1/G3.2). UNCONFIRMED: "
         "the number is on the page but code could not confirm the row or column it is claimed for; read "
         "them on the page and report the value as NOT VERIFIED by code, or cite a locator whose table "
-        "confirms it. A computed "
+        "confirms it; its `fix` says which claimed words the row does not print and where they are. A computed "
         "value passes only against a recorded calc run (calc_id + calc_output); COMPUTED (not_covered) "
         "is model arithmetic: show the equation, say why the calc tool did not apply, and verify each input as its own "
         "item. Carry every warning into the packet "
@@ -205,6 +207,92 @@ def _check_value(con: sqlite3.Connection, doc: _Doc, sel: list[sqlite3.Row], ite
         confirmed |= in_row
     if res["status"] == "PASS":
         _check_context(item, res, confirmed, unread, where, bool(row["has_table"]))
+    if res["status"] == "UNCONFIRMED":
+        _explain(doc, str(row["locator"]), want, _context_claims(item), confirmed, res)
+
+
+# ------------------------------------------------------------------ how to fix an unconfirmed claim (2026-11-02)
+# Owner decision 2026-11-02 (agent runs A09): an UNCONFIRMED item says where the claimed words were found - the
+# value's row, its column heading, another heading, the caption or a footnote - and lists the table's labels, so the
+# agent can resubmit the claim in the row's own words. The status is never changed here.
+FOOTNOTE_LINE = re.compile(r"^\s*(?:\*+|†|‡|\(?[a-z]\))\s*\S")
+STOP_WORDS = frozenset({"in", "of", "by", "the", "and", "a", "an", "for", "to", "at", "on", "or", "with", "range"})
+
+
+def _words(text: str) -> set[str]:
+    return set(_seq(text.replace("/", " ")).split())
+
+
+def _in(word: str, words: set[str]) -> bool:
+    """'bolt' is in 'Bolts': a word, or the word with a plural ending of up to two letters."""
+    return word in words or any(w.startswith(word) and len(w) - len(word) <= 2 for w in words if len(word) > 2)
+
+
+def _labels_found(doc: _Doc, locator: str, want: list[float]) -> dict[str, Any] | None:
+    """The extracted table holding the value at this page: the value's row cells and column heading, every column
+    heading, each row's first label, the caption, and the page's footnote lines. None when no table holds it."""
+    page = re.sub(r"\s+table\s+\d+$", "", locator.strip().lower())
+    chunks = [ch for ch in doc.chunks if str(ch["locator"]).lower() == page
+              or str(ch["locator"]).lower().startswith(page + " ")]
+    notes = [ln.strip()[:200] for ch in chunks for ln in str(ch["text"] or "").splitlines()
+             if "|" not in ln and FOOTNOTE_LINE.match(ln)][:5]
+    for ch in chunks:
+        lines = str(ch["text"] or "").splitlines()
+        grid = [[c.replace("⁣", " ").strip() for c in ln.strip().strip("|").split("|")]
+                for ln in lines if ln.count("|") >= 2]
+        grid = [r for r in grid if not all(re.fullmatch(r":?-{2,}:?", c) for c in r if c)]
+        first = next((i for i, r in enumerate(grid) if any(NUMERIC_CELL.match(c) and numbers(c) for c in r if c)), None)
+        if first is None:
+            continue
+        heads, body = grid[:first], grid[first:]
+        width = max(len(r) for r in grid)
+        headings = [re.sub(r"\s+", " ", " ".join(h[j] for h in heads if j < len(h) and h[j])).strip()
+                    for j in range(width)]
+        for cells in body:
+            col = next((j for j, c in enumerate(cells) for x, *_ in numbers(c)
+                        if math.isclose(x, want[0], rel_tol=1e-9, abs_tol=1e-12)), None)
+            if col is None or not all(any(math.isclose(v, x, rel_tol=1e-9, abs_tol=1e-12)
+                                          for c in cells for x, *_ in numbers(c)) for v in want):
+                continue
+            caption = " ".join(ln.strip() for ln in lines[:next((i for i, ln in enumerate(lines) if "|" in ln), 0)]
+                               if ln.strip())
+            return {"row": [c for c in cells if c], "column": headings[col] if col < len(headings) else "",
+                    "headings": [h for h in headings if h], "rows": [next((c for c in r if c), "") for r in body][:40],
+                    "caption": caption[:300], "footnotes": notes}
+    return None
+
+
+def _explain(doc: _Doc, locator: str, want: list[float], claims: dict[str, str], confirmed: set[str],
+             res: dict[str, Any]) -> None:
+    """Say, for each unconfirmed claim, where its words are printed when they are not in the value's row."""
+    found = _labels_found(doc, locator, want) if want else None
+    if not found:
+        return
+    row_w = _words(" ".join(found["row"]))
+    col = str(found["column"])
+    places = [(f"its column heading '{col}'", _words(col)),
+              ("another column heading", _words(" ".join(h for h in found["headings"] if h != col))),
+              (f"the caption '{found['caption'][:80]}'", _words(found["caption"])),
+              ("a footnote", _words(" ".join(found["footnotes"])))]
+    parts: list[str] = []
+    for f, claim in claims.items():
+        if f in confirmed:
+            continue
+        stray: dict[str, list[str]] = {}
+        for w in re.findall(r"[A-Za-z0-9.]+", claim.replace("-", " ").replace("/", " ")):
+            lw = w.lower().strip(".")
+            if not lw or lw in STOP_WORDS or _in(lw, row_w):
+                continue
+            stray.setdefault(next((p for p, ws in places if _in(lw, ws)), "nowhere on this table"), []).append(f"'{w}'")
+        said = [f"{', '.join(ws)} {'is' if len(ws) == 1 else 'are'} in {p}" for p, ws in stray.items()]
+        parts.append(f"{f} '{claim}': " + ("; ".join(said) if said else "its words are in the row, but not as "
+                                           "the row prints them"))
+    if not parts:
+        return
+    res["labels_found"] = found
+    res["fix"] = ("; ".join(parts) + f". Name the row only by words printed in it ({' | '.join(found['row'])[:200]}) "
+                  "and the column by its quantity; a column heading, the caption or a footnote does not confirm a "
+                  "row or a condition: leave such words out of the claim and report them as NOT VERIFIED by code.")
 
 
 CONTEXT = ("material", "temper", "form", "thickness", "basis", "direction", "row")
@@ -436,6 +524,8 @@ def _compatible(field: str, claim: str, rec: str | None) -> bool | None:
         return a is not None and b is not None and b[0] <= a[0] and a[1] <= b[1]
     if field == "basis":
         return _norm(claim).rstrip(".").removesuffix("-basis").strip() == _norm(rec)
+    if field == "direction":                    # order matters: an L-T record never confirms T-L (2026-11-02)
+        return _has(claim, rec) or _has(rec, claim)
     c, r = _tokens(claim), _tokens(rec)
     return bool(c) and (c <= r or r <= c)       # "T6" in "T6, T62a"; "plate" in "sheet and plate"
 

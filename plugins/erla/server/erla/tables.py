@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import props, store
 
-TABLES_VERSION = "tables-1"
+TABLES_VERSION = "tables-2"     # 2026-11-02: turned pages, borderless tables on other pages, words printed twice
 
 
 def pending_docs(con, limit: int | None = None) -> list:

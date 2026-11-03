@@ -148,8 +148,9 @@ def _load(cfg, con) -> dict[str, Any] | None:
     return idx
 
 
-def search(cfg, con, query: str, top: int = 600) -> list[tuple[int, float]]:
-    """[(chunk_id, score)] by sparse dot product; [] when the channel is off or not built."""
+def search(cfg, con, query: str, top: int = 600, allowed=None) -> list[tuple[int, float]]:
+    """[(chunk_id, score)] by sparse dot product; [] when the channel is off or not built. `allowed` (sorted
+    chunk ids, search._allowed_chunks): only those chunks are ranked, before the cut."""
     if not enabled(cfg):
         return []
     idx = _load(cfg, con)
@@ -163,6 +164,8 @@ def search(cfg, con, query: str, top: int = 600) -> list[tuple[int, float]]:
             continue
         a, b = idx["ptr"][j], idx["ptr"][j + 1]
         np.add.at(scores, idx["pos"][a:b], w * idx["vals"][a:b])
+    if allowed is not None:
+        scores[~np.isin(idx["chunk_ids"], np.asarray(allowed, dtype=np.int64))] = 0.0
     nz = int(np.count_nonzero(scores))
     if not nz:
         return []

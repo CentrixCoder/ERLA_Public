@@ -14,7 +14,7 @@ from typing import Any
 
 # Source spellings -> pint expressions. Keys are matched case-sensitively first, then lower-case.
 ALIASES = {
-    "ksi": "ksi", "psi": "psi", "msi": "msi", "Msi": "msi", "MSI": "msi", "KSI": "ksi", "PSI": "psi",
+    "ksi": "ksi", "kpsi": "ksi", "psi": "psi", "msi": "msi", "Msi": "msi", "MSI": "msi", "KSI": "ksi", "PSI": "psi",
     "MPa": "MPa", "GPa": "GPa", "kPa": "kPa", "Pa": "Pa", "N/mm2": "N/mm**2", "N/mm^2": "N/mm**2",
     "N/mm²": "N/mm**2", "kgf/mm2": "kgf/mm**2", "kgf/mm^2": "kgf/mm**2",
     "lb": "lbf", "lbs": "lbf", "lbf": "lbf", "kip": "kip", "kips": "kip", "N": "N", "kN": "kN",
@@ -41,7 +41,7 @@ UNIT_IN_LABEL = re.compile(
 QUANTITY_DIM = {
     "Ftu": "[pressure]", "Fty": "[pressure]", "Fcy": "[pressure]", "Fsu": "[pressure]",
     "Fbru": "[pressure]", "Fbry": "[pressure]", "E": "[pressure]", "Ec": "[pressure]", "G": "[pressure]",
-    "KIc": "[pressure]*[length]**0.5", "density": "[mass]/[length]**3", "elongation": "",
+    "KIc": "[pressure]*[length]**0.5", "Kc": "[pressure]*[length]**0.5", "Sp": "[pressure]", "density": "[mass]/[length]**3", "elongation": "",
     "poisson": "", "Kt": "", "Kf": "",
 }
 SI_TARGET = {"[pressure]": "MPa", "[pressure]*[length]**0.5": "MPa*m**0.5", "[mass]/[length]**3": "kg/m**3",

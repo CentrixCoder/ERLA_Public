@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 [![Status: production](https://img.shields.io/badge/status-production-brightgreen.svg)](#status)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
@@ -17,6 +17,23 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 1.0.0
+
+- **Production release.** The free core edition stays MIT licensed.
+- **Every reported value is checked in code before it leaves ERLA:** a packet is logged or exported only when a
+  passed value check covers its values, and one that says every value is verified while citing a check that did
+  not pass is refused. In Claude Code, a chat answer with an unchecked number is sent back once, then you are
+  warned.
+- **Handbook tables keep their row and column labels:** rotated pages, headings over column groups or stacked
+  over several rows, and borderless tables with stacked fractions are read correctly, so more table values
+  verify. A direction must match in order (`L-T` is not `T-L`).
+- **When a value cannot be confirmed, the check says why:** which claimed words the row does not print, where
+  they are (a column heading, the caption, a footnote), and the labels it found.
+- **Web gate** also covers network commands run in a shell and browser tools, and still fails closed.
+- **Search filters** find documents ranked below the first candidates.
+- **Upgrade:** after updating, quit and reopen the Claude app and run `erla refresh`. Tables in PDFs are re-read
+  within each refresh's time budget, so a large library may need more than one refresh.
+
 ### 0.7.2
 
 - **A correctness audit fixed 21 defects**, each with a test that fails on 0.7.1.
@@ -47,26 +64,6 @@ Updated automatically at every release; older versions are listed under
 - **`run_eval` works again** from the agent (it failed on every call).
 - **`erla eval` shows how sure a score is:** 95% intervals on every metric, scores per question class, questions
   the library cannot answer reported apart, and `--save` / `--compare` to compare two runs question by question.
-
-### 0.7.0
-
-- **Search finds what it used to miss.** A word at the end of a sentence ("was measured.") and the parts of a
-  compound name (`MMPDS` in `MMPDS-17`, `7075` in `7075-T651`) are found; exact matches still work.
-- **Keyword ranking is exact BM25F** with the Lucene IDF, scored over every chunk that contains a query term (no
-  600-row limit before scoring). k1, b and the field weights (text, title, path) are settings in the site
-  configuration (`search.bm25`).
-- **Meaning-based search covers whole pages.** Each chunk is embedded in overlapping windows that start with the
-  document title, standard number and page, instead of only its first 2,000 characters; the re-ranker reads the
-  title too.
-- **Better answers from one search.** `library_search` takes the kind of question (`intent`: property, research,
-  locate) and its variants (`queries`) in one call, and returns an `evidence` verdict (STRONG, PARTIAL, WEAK,
-  NONE) with the next step.
-- **Citation graph.** `library_refs` lists a standard, book, specification or regulation's editions in your library
-  and the documents that cite it, with the edition each cites ("Peterson, 3rd ed.", MIL-PRF-23377J, AC 20-107B,
-  company spec numbers; your own numbering schemes under `refs.patterns`).
-- **Feedback follows the file** and, with your question, counts only for that topic.
-- **Upgrade:** run `erla refresh` once after updating (it rebuilds the search index and re-embeds every chunk;
-  allow an hour or more on a large library).
 
 <!-- release-notes:end -->
 
@@ -240,13 +237,23 @@ in a Claude Code session (desktop app **Code** tab or terminal), not in a claude
 <!-- public:begin status -->
 ## Status
 
-**Beta.** ERLA is tested, released through automated gates, and checks every cited value against its
-source in code (`verify_packet`) before a Result Packet reaches you. It is not yet production grade:
+**Production (1.0.0).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
+every value it reports against its cited source with `verify_packet`, which re-opens the source and checks
+the value in code. The server enforces this where it records a packet: `log_request` and `export_packet`
+refuse a packet that reports values unless a passed `verify_packet` check from the same server session
+covers them. In the Claude Code plugin, an answer shown in the chat is checked too when the turn ends: a
+reported number that no passed check of the session covers sends the answer back once, to verify it or mark
+it NOT VERIFIED, and you are warned about any value still unverified. The check cannot withdraw text
+already shown, and the desktop extension has no such check. Web requests, including network commands run in
+a shell and browser tools, pass a code gate that blocks restricted terms and fails closed. Each release runs
+a shipped set of evaluation cases, adversarial ones included, and a search-quality check on a test library.
+Handbook tables are indexed with their row and column labels, so table values verify in code (after the
+first refresh under 1.0.0). Known limits:
 
-- Search quality is measured on a small golden set from one library, mostly exact value lookups, and no
-  search evaluation gates a release yet.
-- Each tool call is logged, but there is no per-request trace, no latency or cost record and no health
-  alert.
+- A value in a table whose headings did not survive extraction is reported NOT VERIFIED, with the page and
+  column to read; in the 1.0.0 end-to-end run this left one supporting value of one case unverified.
+- Some long analyses cost more than their targets.
+- Two rules (following a link a document asks for, getting around a paywall) rest on the agent's judgment.
 
 Check a value against its cited source before you rely on it.
 <!-- public:end status -->

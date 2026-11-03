@@ -351,9 +351,19 @@ class DocExtractor(_ComExtractor):
         from .. import safeio
         from .word import DocxExtractor
         folder = safeio.mkdir_at(safeio.check(self.cfg, self.cfg.log_dir / "doc_copy"))
-        out = safeio.check(self.cfg, folder / f"{uuid.uuid4().hex}.docx")
+        stem = uuid.uuid4().hex
+        out = safeio.check(self.cfg, folder / f"{stem}.docx")
+        # Word opens a copy under a new name, never the library path: Word remembers a path it crashed or was
+        # killed on and, at the next open of it, waits on a hidden "serious error" dialog, so that file cost the
+        # full timeout at every re-extraction (F-34; the COM test has done this since PR #105).
+        src = safeio.check(self.cfg, folder / f"{stem}.doc")
         try:
-            tag, data = self.worker.run(("docx", str(Path(path).resolve()), str(out)))
+            try:
+                safeio.copyfile(self.cfg, path, src)
+            except OSError as exc:
+                tag, data = "err", f"copy for Word failed: {type(exc).__name__}: {exc}"
+            else:
+                tag, data = self.worker.run(("docx", str(src), str(out)))
             if tag == "ok" and out.is_file():
                 res = DocxExtractor(self.cfg).extract(out)
                 if res.status == "ok":
@@ -363,6 +373,10 @@ class DocExtractor(_ComExtractor):
             com_error = str(data)[:300]
         finally:
             safeio.unlink_at(out)
+            try:
+                safeio.unlink_at(src)
+            except OSError:
+                pass                                # still held by a Word being killed: the sweep removes it later
             _sweep(self.cfg, folder)
         worker, self.worker = self.worker, None          # fallback: the Office-free parser only
         try:

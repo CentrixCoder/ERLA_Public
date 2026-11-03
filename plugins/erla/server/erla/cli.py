@@ -170,9 +170,13 @@ def cmd_config(a) -> int:
 def cmd_index(a) -> int:
     from .indexer import Indexer
     cfg = _cfg()
-    idx = Indexer(cfg, log=lambda m: _out(m))
-    st = idx.run(full=a.full, limit=a.limit, subpath=a.path, ocr=a.ocr)
-    idx.close()
+    lock = _lock_or_exit(cfg, "index")
+    try:
+        idx = Indexer(cfg, log=lambda m: _out(m), heartbeat=_make_heartbeat(lock))
+        st = idx.run(full=a.full, limit=a.limit, subpath=a.path, ocr=a.ocr)
+        idx.close()
+    finally:
+        safeio.unlink_at(lock)
     _out(json.dumps(st.as_dict(), indent=2))
     return 0
 
@@ -316,20 +320,51 @@ def _lock_is_stale(lock, hang_s: float | None = None) -> tuple[bool, str]:
 
 
 def _acquire_refresh_lock(lock) -> bool:
-    """Atomic create; reclaim once if the existing lock is stale (hard-killed run skips `finally`)."""
+    """Atomic create; reclaim the existing lock if it is stale (hard-killed run skips `finally`).
+
+    Reclaiming renames the lock to a name unique to this writer and goes on only if the renamed file still
+    holds what was judged stale. Two writers that both judged a dead lock stale cannot both win: the slower
+    one renames the winner's fresh lock, sees other content, puts it back and reports busy (F-30; before, it
+    deleted the winner's lock and created its own, so two refreshes ran at once)."""
     import datetime
-    for _ in range(2):
+    import threading
+    for _ in range(3):
         try:
             stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
             safeio.create_exclusive_at(lock, f"{os.getpid()} {stamp} hb=1")
             return True
         except FileExistsError:
+            seen = _read_lock(lock)
             stale, why = _lock_is_stale(lock)
             if not stale:
                 return False
+            # a sibling in the lock's checked log folder (G1.2), unique to this writer
+            aside = safeio.WritablePath(lock.with_name(f"{lock.name}.{os.getpid()}.{threading.get_ident()}.stale"))
+            try:
+                safeio.replace_at(lock, aside)
+            except FileNotFoundError:
+                continue                        # another writer reclaimed it first: try to create again
+            if _read_lock(aside) != seen:       # a fresh lock was created after the judgment: not ours to take
+                _restore_lock(aside, lock)
+                return False
             _out(f"reclaiming stale refresh lock ({why})")
-            safeio.unlink_at(lock)
+            safeio.unlink_at(aside)
     return False
+
+
+def _restore_lock(aside, lock) -> None:
+    """Put back a lock renamed by mistake, never over a lock created since."""
+    if not safeio.move_if_absent_at(aside, lock):
+        _out(f"refresh lock changed twice while reclaiming; {lock} kept, {aside.name} discarded")
+        safeio.unlink_at(aside)
+
+
+def _lock_or_exit(cfg, what: str):
+    """Take the refresh lock for a command that writes the index, or exit with the holder (F-30)."""
+    lock = _lock_path(cfg)
+    if not _acquire_refresh_lock(lock):
+        sys.exit(f"refresh running (lock {lock}, {_read_lock(lock)}); run `erla {what}` after it finishes")
+    return lock
 
 
 def _make_heartbeat(lock, every_s: float = HEARTBEAT_EVERY_S):
@@ -381,9 +416,13 @@ def cmd_ocr(a) -> int:
     cfg = _cfg()
     if not cfg.ocr.enabled:
         sys.exit("OCR disabled in config")
-    idx = Indexer(cfg, log=lambda m: _out(m))
-    st = idx.run_ocr(limit=a.limit)
-    idx.close()
+    lock = _lock_or_exit(cfg, "ocr")
+    try:
+        idx = Indexer(cfg, log=lambda m: _out(m), heartbeat=_make_heartbeat(lock))
+        st = idx.run_ocr(limit=a.limit)
+        idx.close()
+    finally:
+        safeio.unlink_at(lock)
     _out(json.dumps(st.as_dict(), indent=2))
     return 0
 
@@ -695,16 +734,22 @@ def cmd_embed(a) -> int:
     cfg = _cfg()
     if not cfg.embeddings.get("enabled"):
         sys.exit("embeddings disabled in config")
-    con = _con(cfg, write=True)
-    p = prune_duplicate_embeddings(con)
-    n = embed_pending(con, cfg, limit=a.limit, log=_out)
-    m = export_matrix(con, cfg)
-    _out(f"pruned {p} duplicate-document vectors; embedded {n} new chunks; "
-         f"vector index rows: {m} ({vector_backend(cfg)})")
-    from . import sparse
-    if sparse.enabled(cfg):
-        sp = sparse.embed_pending(con, cfg, limit=a.limit, log=_out)
-        _out(f"sparse: encoded {sp} chunks; {sparse.mark_built(con)} sparse vectors (model {sparse.model_name(cfg)})")
+    lock = _lock_or_exit(cfg, "embed")
+    try:
+        beat = _make_heartbeat(lock)
+        con = _con(cfg, write=True)
+        p = prune_duplicate_embeddings(con)
+        n = embed_pending(con, cfg, limit=a.limit, log=_out, progress=beat)
+        m = export_matrix(con, cfg, progress=beat)
+        _out(f"pruned {p} duplicate-document vectors; embedded {n} new chunks; "
+             f"vector index rows: {m} ({vector_backend(cfg)})")
+        from . import sparse
+        if sparse.enabled(cfg):
+            sp = sparse.embed_pending(con, cfg, limit=a.limit, log=_out, progress=beat)
+            _out(f"sparse: encoded {sp} chunks; {sparse.mark_built(con)} sparse vectors "
+                 f"(model {sparse.model_name(cfg)})")
+    finally:
+        safeio.unlink_at(lock)
     return 0
 
 

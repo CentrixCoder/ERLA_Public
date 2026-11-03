@@ -25,6 +25,7 @@ ERLA_ROOT is set, so it is shared with the ERLA desktop extension.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -60,6 +61,27 @@ def wanted_version() -> str:
     return m.group(1) if m else "0"
 
 
+BUILD_OUTPUT = ("build", "dist")       # pip's in-tree build writes these (and *.egg-info) into the server folder
+CONSTRAINTS = "constraints.txt"        # in the server folder, so wanted_build() covers the pins (F-06)
+
+
+def wanted_build() -> str:
+    """SHA-256 over the relative paths and bytes of the server package this plugin ships (F-32).
+
+    The stamp records it next to the version: a plugin whose server files changed under the same version
+    (a rebuilt package, a changed dependency pin) is reinstalled; before, the version alone decided and the
+    old runtime kept running. pip's own build output in the folder is left out, so installing does not
+    change it."""
+    h = hashlib.sha256()
+    for p in sorted(SERVER_SRC.rglob("*")):
+        rel = p.relative_to(SERVER_SRC)
+        if (not p.is_file() or rel.parts[0] in BUILD_OUTPUT or p.suffix in (".pyc", ".pyo")
+                or any(part == "__pycache__" or part.endswith(".egg-info") for part in rel.parts)):
+            continue
+        h.update(rel.as_posix().encode("utf-8") + b"\0" + p.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
 def venv_healthy() -> bool:
     """The venv exists and the interpreter it was built from is still there."""
     if not VPY.is_file():
@@ -76,8 +98,9 @@ def installed_ok() -> bool:
     if not (STAMP.is_file() and venv_healthy()):
         return False
     try:
-        return json.loads(STAMP.read_text(encoding="utf-8")).get("version") == wanted_version()
-    except (OSError, ValueError):
+        stamp = json.loads(STAMP.read_text(encoding="utf-8"))
+        return stamp.get("version") == wanted_version() and stamp.get("build") == wanted_build()
+    except (OSError, ValueError, AttributeError):
         return False
 
 
@@ -144,11 +167,20 @@ def install(echo: bool = True) -> int:
     if not take_lock():
         return wait_for_install(echo) if echo else 0
     try:
+        build = wanted_build()                  # what is installed, hashed before pip writes its build output
         _log(f"installing ERLA {wanted_version()} into {VENV}", echo)
+        constraints = SERVER_SRC / CONSTRAINTS
+        if not constraints.is_file():           # fail closed: never install the dependencies unpinned
+            _log(f"ERROR: {constraints} is missing, so the locked dependency versions are unknown; "
+                 "update or reinstall the ERLA plugin", echo)
+            return 3
         if not venv_healthy():                  # missing, or its base Python was removed
             subprocess.run([sys.executable, "-m", "venv", "--clear", str(VENV)], check=True)
+        # -c: the dependency versions of uv.lock (built into server/constraints.txt by packaging/build.py), not
+        # whatever PyPI has on the day of the install (F-06); lines whose markers do not match this Python or
+        # platform are ignored by pip
         steps = [[str(VPY), "-m", "pip", "install", "--upgrade", "pip"],
-                 [str(VPY), "-m", "pip", "install", "--upgrade", str(SERVER_SRC)]]
+                 [str(VPY), "-m", "pip", "install", "--upgrade", "-c", str(constraints), str(SERVER_SRC)]]
         for cmd in steps:
             _log("running: " + " ".join(cmd[2:]), echo)
             with open(LOG, "a", encoding="utf-8") as fh:
@@ -156,7 +188,7 @@ def install(echo: bool = True) -> int:
             if rc != 0:
                 _log(f"ERROR: step failed (exit {rc}); see {LOG}", echo)
                 return rc
-        STAMP.write_text(json.dumps({"version": wanted_version(), "python": sys.version.split()[0],
+        STAMP.write_text(json.dumps({"version": wanted_version(), "build": build, "python": sys.version.split()[0],
                                      "installed": time.strftime("%Y-%m-%d %H:%M:%S")}), encoding="utf-8")
         _log(f"ERLA runtime installed. {RECONNECT}", echo)
         return 0
@@ -201,7 +233,7 @@ def main(argv: list[str]) -> int:
     stub = PLUGIN_ROOT / "scripts" / "stub_server.py"
     mcp_mode = SERVER_SRC / "erla" / "core" / "protocols" / "MCP_MODE.md"
     return subprocess.call([sys.executable, str(stub), str(LOG), wanted_version(),
-                            f"{sys.version_info[0]}.{sys.version_info[1]}",
+                            f"{sys.version_info[0]}.{sys.version_info[1]}", "--build", wanted_build(),
                             "--handoff", str(STAMP), str(LOCK), str(mcp_mode), "--", *server_cmd()],
                            env=server_env(), cwd=str(DATA))
 

@@ -21,16 +21,23 @@ def _sheet_chunks(name: str, rows: list[list], res: ExtractResult) -> None:
     width = max((len(r) for r in rows), default=0)
     if width == 0:
         return
-    header = None
+
+    def filled(r: list) -> int:
+        return sum(v not in (None, "") for v in r)
+
+    # the heading row: the first with 2+ filled cells, so neither a title row above it nor a blank row 1 is
+    # repeated as the header (production loop F-28); a one-column sheet falls back to its first filled row
+    head = next((i for i, r in enumerate(rows) if filled(r) >= 2), None)
+    if head is None:
+        head = next((i for i, r in enumerate(rows) if filled(r)), None)
     for start in range(0, len(rows), ROW_BLOCK):
         block = rows[start:start + ROW_BLOCK]
-        if not any(any(v not in (None, "") for v in r) for r in block):
+        if not any(filled(r) for r in block):
             continue
-        if header is None:
-            header = block[0]
+        if head is None or head >= start:
             body = block
         else:
-            body = [header] + block   # repeat header so each chunk is self-describing
+            body = [rows[head]] + block   # repeat header so each chunk is self-describing
         md = rows_to_markdown(body)
         if not md:
             continue
@@ -41,6 +48,7 @@ def _sheet_chunks(name: str, rows: list[list], res: ExtractResult) -> None:
 # --------------------------------------------------------------------- XLSX
 class XlsxExtractor(Extractor):
     exts = ("xlsx", "xlsm")
+    version = "xlsx-2"            # production loop 2026-11-02: continuation blocks repeat the heading row
 
     def extract(self, path: Path) -> ExtractResult:
         import openpyxl
@@ -71,6 +79,7 @@ class XlsxExtractor(Extractor):
 # ---------------------------------------------------------------- XLS (BIFF)
 class XlsExtractor(Extractor):
     exts = ("xls",)
+    version = "xls-2"             # production loop 2026-11-02: continuation blocks repeat the heading row
 
     def extract(self, path: Path) -> ExtractResult:
         import xlrd

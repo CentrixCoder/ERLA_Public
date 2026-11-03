@@ -5,7 +5,7 @@ holds none of its values. The checker records its own estimates (``estimate``) b
 lead's values (``reveal``), and the comparison is computed here, not by a model. ``close`` records the
 verdict and refuses one that is not consistent with that comparison. ``log_request`` and
 ``export_packet`` refuse a packet the user's check policy says must be checked unless it carries a
-closed check (or a stated reason it was not checked).
+closed check of that packet (or one of the allowed reasons it was not checked; F-36).
 
 Who may call what is a permission, not a promise: in the plugin the lead's tools allowlist leaves out
 ``check_estimate``, ``check_reveal`` and ``check_close``, which only the Professor holds. Where one
@@ -50,6 +50,18 @@ ID = re.compile(r"^k-[0-9a-f]{12}$")
 # on values is not a PASS on completeness, so without an audited inventory such a check is at most PASS WITH FINDINGS.
 COVERAGE_STATUS = ("COMPUTED", "NOT CHECKED", "REQUIRED INPUT")
 MARGIN = re.compile(r"(?:\bMS\b|\bmargin)", re.IGNORECASE)
+# F-36 (audit D5): the reasons a packet the policy requires to be checked may go unchecked, each with the wordings
+# the protocols and agents use. A reason starts with one of them (then a separator and any detail); any other text
+# is refused. "no checker": the client has neither sub-agents nor the check tools (instructions W9 says to run a
+# labelled self-check when only the Agent tool is missing). A packet is not checked by saying so.
+UNCHECKED: dict[str, tuple[str, ...]] = {
+    "no values": ("no values", "no value", "not found"),
+    "user declined": ("user declined", "the user declined", "declined by the user", "user asked for no check"),
+    "no checker": ("no checker", "no sub-agents", "no subagents", "no agent tool", "agent tool unavailable"),
+    "check policy off": ("check policy off", "policy off"),
+}
+# a checked value matches a packet number within rounding of the reported figures (3 significant figures: 0.5 %)
+BIND_TOL = 5e-3
 
 
 class CheckError(ValueError):
@@ -116,6 +128,7 @@ def open_check(cfg: Config, packet_in: Any, rework_of: str = "", escalate_from: 
         if str(q["units"]).strip() == DECISION:
             if not str(q.get("value") or "").strip():
                 raise CheckError(f"quantity {q['name']!r}: a decision needs its label as value, e.g. 'not critical'")
+            _options(q)
         else:
             _number(q.get("value"), f"quantity {q['name']!r}")
         names.append(str(q["name"]).strip())
@@ -127,11 +140,71 @@ def open_check(cfg: Config, packet_in: Any, rework_of: str = "", escalate_from: 
     # a random salt: two opens of one packet in the same second must not share (and overwrite) one record
     cid = "k-" + hashlib.sha256(f"{body}|{_now()}|{secrets.token_hex(8)}".encode()).hexdigest()[:12]
     rec: dict[str, Any] = {"check_id": cid, "state": "open", "opened": _now(), "packet": packet, "estimates": [],
-                           "comparison": [], "stage": stage, "round": rnd, "prior": prior}
+                           "comparison": [], "stage": stage, "round": rnd, "prior": prior, "bind": _binding(packet)}
     _save(cfg, rec)
     return {"check_id": cid, "brief_part1": brief_part1(packet), "stage": stage, "round": rnd,
             "next": f"send check_id and brief_part1 to the professor agent on {stage.title()} (model "
                     f"'{stage}'); it calls check_estimate, check_reveal and check_close"}
+
+
+def _label(s: Any) -> str:
+    return " ".join(str(s).lower().split())
+
+
+def _options(q: dict[str, Any]) -> list[str]:
+    """A decision's possible conclusions, given by the lead at check_open. The blind checker picks one of them, so
+    the same conclusion in other words still agrees: free-text labels never matched, and two Opus rounds of agent
+    eval A07 (2026-11-02) did not converge on one conclusion and escalated to Fable (owner decision 2026-11-02)."""
+    opts = _list(q.get("options"))
+    labels = [_label(o) for o in opts or [] if str(o).strip()]
+    if not opts or len(labels) < 2 or len(set(labels)) != len(labels) or _label(q.get("value")) not in labels:
+        raise CheckError(f"quantity {q['name']!r}: a decision needs options, a list of at least two different "
+                         "conclusions the checker can choose from (e.g. ['critical', 'not critical'] or ['LEFM "
+                         "fracture', 'net-section yield', 'plastic collapse']), and its value must be one of them")
+    return [str(o).strip() for o in opts if str(o).strip()]
+
+
+def _binding(packet: dict[str, Any]) -> dict[str, Any]:
+    """What binds a check to the packet it checked (F-36): the lead's checked values and decision labels, and a
+    digest of the quantities, fixed at check_open. The gate compares them with the packet logged or exported."""
+    qs = [cast(dict[str, Any], q) for q in packet["quantities"]]
+    canon = json.dumps([[str(q["name"]).strip(), str(q.get("value")), str(q["units"]).strip()] for q in qs],
+                       ensure_ascii=False)
+    return {"digest": hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16],
+            "values": [_number(q.get("value"), str(q["name"])) for q in qs if str(q["units"]).strip() != DECISION],
+            "labels": [_label(q.get("value")) for q in qs if str(q["units"]).strip() == DECISION]}
+
+
+def _close_to(x: float, found: list[float]) -> bool:
+    return any(abs(x - y) <= BIND_TOL * max(abs(x), abs(y)) or x == y for y in found)
+
+
+def _bind_error(check_id: str, bind: dict[str, Any] | None, packet_text: str | None, verified: list[float] | None,
+                unresolved: bool) -> tuple[str | None, bool | None]:
+    """(refusal, bound): is the packet being recorded the one this check checked? ``packet_text`` (export): every
+    checked value and decision label is in the packet (an UNRESOLVED packet: at least one). ``verified`` (log, whose
+    record carries no values): at least one checked value is a value the verification it names was asked about
+    (``packetgate.examined_values``, any status: a packet reported NOT VERIFIED is still the packet checked).
+    Neither given (a log record without a known verification): (None, False), recorded as not bound."""
+    if bind is None:
+        return (f"check {check_id} was opened before checks were bound to their packets: open a new check of this "
+                "packet (check_open)"), None
+    values = [float(v) for v in _list(bind.get("values")) or []]
+    labels = [str(s) for s in _list(bind.get("labels")) or []]
+    if packet_text is not None:
+        found = [n for n, *_ in numbers(packet_text)]
+        text = _label(packet_text)
+        hits = [_close_to(v, found) for v in values] + [lb in text for lb in labels]
+        ok = any(hits) if unresolved else bool(hits) and all(hits)
+    elif verified is not None and values:
+        ok = any(_close_to(v, verified) for v in values)
+    else:
+        return None, False
+    if ok:
+        return None, True
+    return (f"check {check_id} checked another packet, not the packet being recorded: its checked values "
+            f"{[f'{v:g}' for v in values] + labels} are not all in this packet. Open a check of this packet "
+            "(check_open) and pass its check_id"), False
 
 
 def _chain(cfg: Config, rework_of: str, escalate_from: str) -> tuple[str, int, str]:
@@ -198,7 +271,9 @@ def brief_part1(packet: dict[str, Any]) -> dict[str, Any]:
     coverage inventory is a list of what the draft covers, not a result, so the checker sees it first (W9 3a)."""
     keep = ("question", "inputs", "sources", "method", "discipline")
     out = {k: packet[k] for k in keep if k in packet}
-    out["quantities"] = [{"name": q["name"], "units": q["units"]} for q in packet["quantities"]]
+    out["quantities"] = [{"name": q["name"], "units": q["units"],
+                          **({"options": _options(q)} if str(q["units"]).strip() == DECISION else {})}
+                         for q in packet["quantities"]]
     rows = _coverage_rows(packet)
     if rows:
         out["coverage"] = rows
@@ -214,6 +289,7 @@ def estimate(cfg: Config, check_id: str, estimates: Any) -> dict[str, Any]:
         raise CheckError(f"check {check_id} is {rec['state']}: estimates are fixed once the lead's values are revealed")
     want = [q["name"] for q in rec["packet"]["quantities"]]
     decisions = {q["name"]: str(q["units"]).strip() == DECISION for q in rec["packet"]["quantities"]}
+    options = {q["name"]: [_label(o) for o in _list(q.get("options")) or []] for q in rec["packet"]["quantities"]}
     items = _list(estimates)
     if items is None:
         raise CheckError("estimates must be a list")
@@ -233,6 +309,10 @@ def estimate(cfg: Config, check_id: str, estimates: Any) -> dict[str, Any]:
         if decisions.get(name):
             if not str(e.get("value") or "").strip():
                 raise CheckError(f"estimate {name!r}: give your own conclusion as the value")
+            if options.get(name) and _label(e["value"]) not in options[name]:
+                raise CheckError(f"estimate {name!r}: give one of the options as the value, as written: "
+                                 f"{[q.get('options') for q in rec['packet']['quantities'] if q['name'] == name][0]}; "
+                                 "put your reasoning in method")
             got[name] = {"name": name, "value": str(e["value"]).strip(), "units": DECISION,
                          "method": str(e["method"]).strip()}
             continue
@@ -427,7 +507,8 @@ def status(cfg: Config, check_id: str) -> dict[str, Any]:
     """What the lead may see: the state, and once closed the verdict, comparison and findings."""
     rec = load(cfg, check_id)
     out: dict[str, Any] = {"check_id": check_id, "state": rec["state"], "stage": rec.get("stage", FIRST_STAGE),
-                           "round": rec.get("round", 1), "prior": rec.get("prior", "")}
+                           "round": rec.get("round", 1), "prior": rec.get("prior", ""),
+                           "check_digest": (_obj(rec.get("bind")) or {}).get("digest")}
     if rec["state"] == "closed":
         out.update(verdict=rec["verdict"], checker=rec["checker"], comparison=rec["comparison"],
                    findings=rec["findings"], notes=rec.get("notes", []), converged=rec.get("converged", True),
@@ -481,15 +562,33 @@ def needs_check_text(cfg: Config, markdown: str) -> bool:
     return bool(re.search(r"\bCOMPUTED\b", markdown) or (pat and pat.search(markdown)))
 
 
-def gate(cfg: Config, needed: bool, check_id: str, unchecked_reason: str, unresolved: bool = False) -> dict[str, Any]:
+def unchecked_code(reason: str) -> str | None:
+    """The allowed reason (a key of UNCHECKED) this unchecked_reason states, or None (F-36)."""
+    text = _label(reason)
+    for code, forms in UNCHECKED.items():
+        for form in forms:
+            if text.startswith(form) and (len(text) == len(form) or not text[len(form)].isalnum()):
+                return code
+    return None
+
+
+def gate(cfg: Config, needed: bool, check_id: str, unchecked_reason: str, unresolved: bool = False,
+         packet_text: str | None = None, verified: list[float] | None = None) -> dict[str, Any]:
     """What to record about the check, or raise when the policy requires one and none is given. A check that did
-    not converge is never recorded as a solution: only as UNRESOLVED, and only after the Fable stage."""
+    not converge is never recorded as a solution: only as UNRESOLVED, and only after the Fable stage. A check is
+    accepted only for the packet it checked (``packet_text`` from export_packet, ``verified`` values from the
+    verification log_request names; F-36), and an unchecked packet only with an allowed reason (UNCHECKED)."""
     if check_id:
         st = status(cfg, check_id)
         if st["state"] != "closed":
             raise CheckError(f"check {check_id} is {st['state']}, not closed: finish it (instructions W9) first")
+        refusal, bound = _bind_error(check_id, _obj(load(cfg, check_id).get("bind")), packet_text, verified,
+                                     unresolved)
+        if refusal:
+            raise CheckError(refusal)
         rec = {"check_id": check_id, "check_verdict": st["verdict"], "checker": st["checker"], "stage": st["stage"],
-               "converged": st["converged"], "model_id": st.get("model_id"), "calibrated": st.get("calibrated")}
+               "converged": st["converged"], "model_id": st.get("model_id"), "calibrated": st.get("calibrated"),
+               "check_digest": st.get("check_digest"), "check_bound": bound}
         if st["converged"]:
             return rec
         if st["stage"] != LAST_STAGE or st["checker"] != "erla:professor":
@@ -503,7 +602,14 @@ def gate(cfg: Config, needed: bool, check_id: str, unchecked_reason: str, unreso
         return {**rec, "outcome": "unresolved"}
     if not needed:
         return {}
-    if str(unchecked_reason or "").strip():
-        return {"checked": False, "unchecked_reason": str(unchecked_reason).strip()}
+    reason = str(unchecked_reason or "").strip()
+    allowed = "; ".join(f"'{forms[0]}'" for forms in UNCHECKED.values())
+    if reason:
+        code = unchecked_code(reason)
+        if code is None:
+            raise CheckError(f"unchecked_reason {reason[:80]!r} is not an allowed reason; the allowed reasons are "
+                             f"{allowed} (then any detail). Otherwise run the check (instructions W9) and pass its "
+                             "check_id")
+        return {"checked": False, "unchecked_reason": reason, "unchecked_code": code}
     raise CheckError("the check policy requires an independent check for this packet (instructions W9): pass the "
-                     "check_id of a closed check, or unchecked_reason saying why it could not run")
+                     f"check_id of a closed check, or unchecked_reason with an allowed reason ({allowed})")

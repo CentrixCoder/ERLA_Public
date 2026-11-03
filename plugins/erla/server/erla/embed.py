@@ -396,22 +396,33 @@ def _dedupe(pairs, top: int) -> list[tuple[int, float]]:
     return out
 
 
-def vector_search(cfg, query: str, top: int = 600) -> list[tuple[int, float]]:
+def vector_search(cfg, query: str, top: int = 600, allowed=None) -> list[tuple[int, float]]:
     """Return [(chunk_id, cosine)] best matches (a chunk scores by its best window); [] if no vectors
-    are built or the index dimension does not match the model."""
+    are built or the index dimension does not match the model. `allowed` (sorted chunk ids,
+    search._allowed_chunks): only those chunks are ranked, before the cut."""
     got = _load(cfg)
     if not got:
         return []
     kind, obj, ids = got
     if len(ids) == 0:
         return []
+    keep = None if allowed is None else np.isin(ids, np.asarray(allowed, dtype=np.int64))
+    rows = len(ids) if keep is None else int(keep.sum())
+    if rows == 0:
+        return []
     q = encode(cfg, [query], kind="query")[0]
-    want = min(len(ids), top * 3)        # windows: a chunk may hold several of the best rows
+    want = min(rows, top * 3)            # windows: a chunk may hold several of the best rows
     if kind == "faiss":
         if int(getattr(obj, "d", len(q))) != len(q):
             return []
-        D, I = obj.search(q[None, :].astype(np.float32), want)
-        return _dedupe(((int(ids[i]), float(d)) for i, d in zip(I[0], D[0]) if i >= 0), top)
+        n = want
+        while True:                      # widen until `want` allowed rows came back, or every row was seen
+            D, I = obj.search(q[None, :].astype(np.float32), n)
+            pairs = [(int(i), float(d)) for i, d in zip(I[0], D[0]) if i >= 0 and (keep is None or keep[i])]
+            if keep is None or len(pairs) >= want or n >= len(ids):
+                break
+            n = min(len(ids), n * 4)
+        return _dedupe(((int(ids[i]), d) for i, d in pairs), top)
     mat = obj
     if mat.shape[1] != len(q):
         return []
@@ -420,6 +431,8 @@ def vector_search(cfg, query: str, top: int = 600) -> list[tuple[int, float]]:
     step = 200_000
     for s in range(0, len(ids), step):
         scores[s:s + step] = mat[s:s + step] @ q16
+    if keep is not None:
+        scores[~keep] = -np.inf
     idx = np.argpartition(-scores, want - 1)[:want]
     idx = idx[np.argsort(-scores[idx])]
     return _dedupe(((int(ids[i]), float(scores[i])) for i in idx), top)

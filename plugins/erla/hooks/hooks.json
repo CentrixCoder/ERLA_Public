@@ -5,7 +5,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "WebSearch|WebFetch",
+        "matcher": "WebSearch|WebFetch|Bash|PowerShell|mcp__.*",
         "hooks": [
           {
             "type": "command",
@@ -20,7 +20,28 @@
             ],
             "timeout": 30,
             "onFailure": "block",
-            "statusMessage": "ERLA: checking the web request for restricted terms"
+            "statusMessage": "ERLA: checking the call for restricted terms and protected paths"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "WebFetch|WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "run",
+              "--no-project",
+              "--quiet",
+              "--python",
+              ">=3.11",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/webscan.py"
+            ],
+            "timeout": 15,
+            "statusMessage": "ERLA: scanning the web result for injected instructions"
           }
         ]
       }
@@ -45,6 +66,25 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "run",
+              "--no-project",
+              "--quiet",
+              "--python",
+              ">=3.11",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/answergate.py"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "matcher": "erla:.*",
@@ -61,6 +101,19 @@
               "${CLAUDE_PLUGIN_ROOT}/scripts/subagent_log.py"
             ],
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "run",
+              "--no-project",
+              "--quiet",
+              "--python",
+              ">=3.11",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/answergate.py"
+            ],
+            "timeout": 30
           }
         ]
       }
