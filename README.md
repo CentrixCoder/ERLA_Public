@@ -3,7 +3,7 @@
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.7.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
-[![Status: beta](https://img.shields.io/badge/status-beta-orange.svg)](#status)
+[![Status: production](https://img.shields.io/badge/status-production-brightgreen.svg)](#status)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
 to engineering research. Each agent focuses on a targeted field of engineering, and together they
