@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-1.0.1-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 [![Status: production](https://img.shields.io/badge/status-production-brightgreen.svg)](#status)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
@@ -17,6 +17,13 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 1.0.1
+
+- **Fix:** a table heading printed centred between two columns now heads both, so a value in either column
+  verifies; a value claimed for the wrong direction still fails.
+- **Upgrade:** quit and reopen the Claude app and run `erla refresh`; PDF tables are re-read within each
+  refresh's time budget.
+
 ### 1.0.0
 
 - **Production release.** The free core edition stays MIT licensed.
@@ -54,16 +61,6 @@ Updated automatically at every release; older versions are listed under
   read, and refuses library roots nested in each other.
 - **Upgrade:** after updating, quit and reopen the Claude app and run `erla refresh`; it re-reads text,
   Markdown, JSON, DOCX, EPUB and PPTX files (PDFs and spreadsheets are not re-read).
-
-### 0.7.1
-
-- **Update before your first refresh under 0.7.0.** The full-text upgrade that 0.7.0's first `erla refresh` runs
-  left searches without keyword matches for the minutes it took, and for good if the refresh was stopped
-  midway. It is now one transaction: searches use the old index until the new one is complete, an interrupted
-  upgrade runs again on the next refresh, and an index already left empty is rebuilt.
-- **`run_eval` works again** from the agent (it failed on every call).
-- **`erla eval` shows how sure a score is:** 95% intervals on every metric, scores per question class, questions
-  the library cannot answer reported apart, and `--save` / `--compare` to compare two runs question by question.
 
 <!-- release-notes:end -->
 
@@ -237,7 +234,7 @@ in a Claude Code session (desktop app **Code** tab or terminal), not in a claude
 <!-- public:begin status -->
 ## Status
 
-**Production (1.0.0).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
+**Production (1.0.1).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
 every value it reports against its cited source with `verify_packet`, which re-opens the source and checks
 the value in code. The server enforces this where it records a packet: `log_request` and `export_packet`
 refuse a packet that reports values unless a passed `verify_packet` check from the same server session
@@ -251,7 +248,7 @@ Handbook tables are indexed with their row and column labels, so table values ve
 first refresh under 1.0.0). Known limits:
 
 - A value in a table whose headings did not survive extraction is reported NOT VERIFIED, with the page and
-  column to read; in the 1.0.0 end-to-end run this left one supporting value of one case unverified.
+  column to read.
 - Some long analyses cost more than their targets.
 - Two rules (following a link a document asks for, getting around a paywall) rest on the agent's judgment.
 

@@ -233,8 +233,9 @@ def aligned_grid(page, clip=None, y_tol: float = 3.2, gap: float = 12.0,
     the most numbers (the widest data row). Text left of the first data column is the row label. Other
     phrases go to the nearest data column; a phrase covering several column centres (a spanning
     header such as 'Sheet', or a thickness range centred over an A/B pair) is placed in each column it
-    covers, marked with SPAN_SEP. A temper code standing between the numbers of that line ('2024  T3
-    0.063  145') is a column of its own. Words are read in reading orientation (reading_words)."""
+    covers, marked with SPAN_SEP; so is a heading above the data centred between two columns. A temper code
+    standing between the numbers of that line ('2024  T3  0.063  145') is a column of its own. Words are read in
+    reading orientation (reading_words)."""
     words = reading_words(page, clip, once=once)
     if not words:
         return [], ""
@@ -270,8 +271,11 @@ def aligned_grid(page, clip=None, y_tol: float = 3.2, gap: float = 12.0,
     half = min(b - a for a, b in zip(centers, centers[1:])) / 2
     label_edge = centers[0] - max(half, 8.0)
     tol = max(half * 0.5, 3.0)
+    first_data = next((y for y, ws in body if sum(1 for w in ws if NUM_TOKEN.match(w[4])) >= 2), tmpl[0])
+    # a table whose data rows carry row labels (MMPDS 'Ftu, ksi:', 'L') reads its headings through those labels
+    labelled = any(w[2] <= label_edge + 2.0 for y, ws in body if y >= first_data for w in ws)
     grid = []
-    for _yc, ws in body:
+    for yc, ws in body:
         row = [""] * (len(centers) + 1)
         row[0] = " ".join(w[4] for w in ws if w[2] <= label_edge + 2.0)
         rest = [w for w in ws if w[2] > label_edge + 2.0]
@@ -302,15 +306,27 @@ def aligned_grid(page, clip=None, y_tol: float = 3.2, gap: float = 12.0,
                     row[i + 1] = f"{SPAN_SEP}{t}" if b > a else t
             grid.append([LEADER.sub("", c).strip(" .") for c in row])
             continue
-        for ph in phrases:
+        near = [min(range(len(centers)), key=lambda k: abs(centers[k] - (ph[0][0] + ph[-1][2]) / 2)) for ph in phrases]
+        for n_ph, ph in enumerate(phrases):
             x0, x1 = ph[0][0], ph[-1][2]
             text = " ".join(w[4] for w in ph)
             covered = [i for i, c in enumerate(centers) if x0 - tol <= c <= x1 + tol]
+            taken = {k for m, k in enumerate(near) if m != n_ph}      # columns other phrases of this line head
+            xc = (x0 + x1) / 2
+            # a heading centred between two columns, above the data of a table without row labels (ASM 'Fty
+            # (ksi)' over L and LT, A07 2026-11-02): it heads both, not the nearer one. A heading of one column
+            # sits on that column's centre, so only a centre near the midpoint of a pair counts, and only over
+            # two columns no other phrase of the line heads (a collapsed multi-column heading, doc 786 p.89).
+            pair = next((i for i in range(len(centers) - 1) if abs(xc - (centers[i] + centers[i + 1]) / 2)
+                         <= 0.15 * (centers[i + 1] - centers[i]) and not {i, i + 1} & taken), None) if (
+                not labelled and not row[0] and yc < first_data and len(covered) < 2 and re.search(r"[A-Za-z]", text)
+                and not VALUE_LIKE.match(text) and not text.startswith(tuple(REL_PREFIX))) else None
+            if pair is not None:
+                covered = [pair, pair + 1]
             if len(covered) >= 2 and not NUM_TOKEN.match(text):
                 for i in covered:
                     row[i + 1] = f"{row[i + 1]} {SPAN_SEP}{text}".strip()
             else:
-                xc = (x0 + x1) / 2
                 i = min(range(len(centers)), key=lambda k: abs(centers[k] - xc))
                 row[i + 1] = f"{row[i + 1]} {text}".strip()
         row = [LEADER.sub("", c).strip(" .") for c in row]
