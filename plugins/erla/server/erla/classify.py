@@ -401,6 +401,14 @@ EMAIL_SPELLED_RE = re.compile(
     r"|\b[\w.%+-]+\s+at\s+[\w-]+(?:\s*(?:\.|\s+dot\s+|\(dot\)|\[dot\])\s*[\w-]+)*?"
     r"(?:\s+dot\s+|\(dot\)|\[dot\])\s*(?:com|org|net|gov|mil|edu|io|co|us|uk|de|fr|ca|au|info|biz)\b", re.I)
 
+# Placeholder metadata titles (G2.2 false positives; owner-approved 2026-11-16): a flagged PDF titled "Document:"
+# made every outbound text with the word "document" (a page script's ``document.title``) a blocked query. Such a
+# title identifies nothing; the document's file stem stays a term, and the restricted-name check still runs.
+_PLACEHOLDER_TITLE_RE = re.compile(
+    r"(?:document|untitled(?: document)?|title|presentation|powerpoint presentation|new document"
+    r"|microsoft (?:word|powerpoint|excel)(?: document)?|(?:slide|page|chapter) \d+|revision record"
+    r"|unclassified|sciencedirect|pdf)")
+
 SHORT_TERM = 6      # folded terms shorter than this match only as whole words
 COLLAPSED_MIN = 8   # long terms also match with every separator removed ("z e p h y r i n e", "a/b/c")
 
@@ -472,7 +480,10 @@ def _term_in(t: str, q: str, qc: str | None = None) -> bool:
     probes on a real site, 0.2.16)."""
     if len(t) >= SHORT_TERM:
         tc = t.replace(" ", "")
-        return t in q or (qc is not None and len(tc) >= COLLAPSED_MIN and tc in qc)
+        # a code-like term (letters and digits, e.g. a document number "qzx4417") also matches with its
+        # separators removed below COLLAPSED_MIN: "QZX-4417" and "qzx 4417" passed the gate (2026-11-16)
+        code = re.search(r"[a-z]", tc) is not None and re.search(r"\d", tc) is not None
+        return t in q or (qc is not None and (len(tc) >= COLLAPSED_MIN or code) and tc in qc)
     if len(t) < 3 or not re.search(r"[a-z]", t):
         return False    # "1", "a", "2019": no identifying content; numbers are left to PN_RE
     return re.search(rf"(?<![a-z0-9]){re.escape(t)}(?![a-z0-9])", q) is not None
@@ -615,8 +626,10 @@ def web_query_check(query: str, con: sqlite3.Connection | None = None,
         docs = con.execute("SELECT doc_id, path, title, classification_flag FROM documents").fetchall()
         rows = [r for r in docs if r["classification_flag"] or r["doc_id"] in groups]
         for r in rows:
-            for term in (Path(r["path"]).stem, r["title"] or ""):
-                t = _fold(term)
+            stem, title = _fold(Path(r["path"]).stem), _fold(r["title"] or "")
+            if _PLACEHOLDER_TITLE_RE.fullmatch(title):
+                title = ""                              # a placeholder title names nothing; the stem still does
+            for t in (stem, title):
                 if t and t not in allowed and _term_in(t, q, qc):
                     reasons.append(f"contains a term from a flagged document ({Path(r['path']).name})")
                     break

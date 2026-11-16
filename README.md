@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.1-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-1.0.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 [![Status: production](https://img.shields.io/badge/status-production-brightgreen.svg)](#status)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
@@ -17,6 +17,15 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 1.0.2
+
+- **Web check, fewer false blocks:** a restricted document's placeholder title (such as "Document:") no longer
+  blocks ordinary words in a web search or browser call; its file name still does.
+- **Web check, one gap closed:** a restricted document's short number written with a hyphen or space is now
+  caught.
+- **Security:** a dependency updated for a published advisory.
+- **Upgrade:** quit and reopen the Claude app.
+
 ### 1.0.1
 
 - **Fix:** a table heading printed centred between two columns now heads both, so a value in either column
@@ -40,27 +49,6 @@ Updated automatically at every release; older versions are listed under
 - **Search filters** find documents ranked below the first candidates.
 - **Upgrade:** after updating, quit and reopen the Claude app and run `erla refresh`. Tables in PDFs are re-read
   within each refresh's time budget, so a large library may need more than one refresh.
-
-### 0.7.2
-
-- **A correctness audit fixed 21 defects**, each with a test that fails on 0.7.1.
-- **Export-control markings are caught where they were missed:** across line breaks and hyphenated line ends,
-  the Arms Export Control Act and Export Administration Act wordings, and a marking repeated after a benign
-  phrase. More documents may be flagged after the next refresh.
-- **The web gate** folds accents and decodes `xn--` host names before it checks a query, and checks a search's
-  allowed and blocked domains too.
-- **Value checks are stricter:** a value under another quantity's column fails, and a number on a table page
-  that is in no extracted row is unconfirmed.
-- **Search filters** (file type, tier, year, discipline, flagged) now find documents that ranked below the
-  first 600 keyword matches, and a `.docx` copy of a `.doc` when the filter drops the `.doc`;
-  unfiltered searches rank exactly as before.
-- **Readers:** EPUB superscripts are no longer read as more digits of a value, DOCX tables inside content
-  controls and text in grouped PowerPoint shapes are read, OCR goes on past a page that fails, UTF-16 text files
-  are decoded.
-- **Indexing** is faster with several workers, reads a copied or looped folder once, reports folders it cannot
-  read, and refuses library roots nested in each other.
-- **Upgrade:** after updating, quit and reopen the Claude app and run `erla refresh`; it re-reads text,
-  Markdown, JSON, DOCX, EPUB and PPTX files (PDFs and spreadsheets are not re-read).
 
 <!-- release-notes:end -->
 
@@ -234,7 +222,7 @@ in a Claude Code session (desktop app **Code** tab or terminal), not in a claude
 <!-- public:begin status -->
 ## Status
 
-**Production (1.0.1).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
+**Production (1.0.2).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
 every value it reports against its cited source with `verify_packet`, which re-opens the source and checks
 the value in code. The server enforces this where it records a packet: `log_request` and `export_packet`
 refuse a packet that reports values unless a passed `verify_packet` check from the same server session

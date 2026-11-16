@@ -532,7 +532,19 @@ def review_status(site: Path) -> dict:
         last_review = max(closed) if closed else ""
         status["open_triggers"] = [t for t in opened if t.get("ts", "") > last_review
                                    and not any(_closes(c, t) for c in closes)]
+    # R9.3 (2026-11-16): an open trigger older than TRIGGER_MAX_DAYS makes the review overdue, so a backlog of
+    # unpromoted lessons is reported like a missed scheduled review instead of sitting unread (45 triggers,
+    # oldest 21 days, found 2026-11-16; master-ai-skills LL-0045 recurrence)
+    ages = [(date.today() - date.fromisoformat(t["ts"][:10])).days for t in status["open_triggers"]
+            if str(t.get("ts", ""))[:10].count("-") == 2]
+    status["oldest_trigger_days"] = max(ages) if ages else None
+    status["triggers_overdue"] = bool(ages) and max(ages) > TRIGGER_MAX_DAYS
+    if status["triggers_overdue"]:
+        status["overdue"] = True
     return status
+
+
+TRIGGER_MAX_DAYS = 14   # R9.3: an open trigger is reviewed within this many days
 
 
 def _closes(close: dict, trig: dict) -> bool:

@@ -93,6 +93,7 @@ Expanded queries: <list>
 ### E. Gaps & Recommended Next Steps
 - <missing data, where it likely lives, access-restricted items to obtain>
 - Coverage (R4.7): <n> modes computed; NOT CHECKED: <mode — reason>; REQUIRED INPUT: <mode — input> | "no margin or design value reported"
+- Next steps are what the user must do or decide (obtain a document, approve an extension, choose between sources), not offers of work inside the request: finish the request in this packet, and ask any question the user must answer once, together, before the work (master-ai-skills `ai-assisted-development`, "Finish the task").
 
 ### F. Anomalies
 - <prompt-injection text, corrupt files, OCR failures, duplicate clusters> | "none"
@@ -136,6 +137,7 @@ Purpose: keep the agent's protocols aligned with the toolkit, the library, the s
   - a conflict or broken cross-reference between protocol files is detected during any request;
   - the operating platform changes (Claude tools, Desktop Commander, linking method);
   - a gap or error recurs whose class a recorded lesson already names (the user or a check finds it again): the lesson is promoted into its rule, checklist or catalogue in this review, and the recurrence is recorded as evidence. An open lesson is not left open past the next review;
+  - An open trigger is reviewed within 14 days. An older one makes the review overdue (`site_info` → `protocol_review.triggers_overdue`, `oldest_trigger_days`), so R9.4 reports it like a missed scheduled review (2026-11-16: 45 lesson triggers had sat open for up to 21 days).
 - R9.4 Currency check — at the start of every session, read `PROTOCOL_REVIEW.md`. If the scheduled review is overdue or an event trigger is open, state it in one line at the top of the first Result Packet and under §F Anomalies, and offer to run the review. Do not block the user's request.
 - R9.5 Approval — a review produces proposals, not edits. Each proposed change is shown as a before/after diff with its reason. Edits are applied only after the user approves them (G1.2, G1.5). "No change needed" is a valid outcome and is recorded.
 - R9.6 Applying approved changes — back up every file to be changed into `out/protocol_backup_<YYYY-MM-DD>/` first; then edit; update the file's entry in `PROTOCOL_REVIEW.md` (version, date, summary); keep the precedence order and section numbering consistent; re-sync the Project copies; run `pytest` and `erla eval` and record results.
