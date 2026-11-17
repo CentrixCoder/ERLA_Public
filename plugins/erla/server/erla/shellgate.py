@@ -130,7 +130,7 @@ def scan(command: object) -> tuple[bool, bool]:
     if not isinstance(command, str) or len(command) > MAX_SCAN:
         return True, True
     texts = [command, _dequote(command), *[p for p in _encoded_payloads(command) if p]]
-    net = any(NET_RE.search(t) for t in texts)
+    net = any(NET_RE.search(t) or GIT_OUT_RE.search(t) for t in texts)
     writes = bool(_REDIR_RE.search(command) or ENCODED_RE.search(command)
                   or any(WRITE_RE.search(t) or CODE_RE.search(t) or WEB_ALLOW_RE.search(t) for t in texts[1:]))
     return net, writes
@@ -141,6 +141,90 @@ def network_text(command: str) -> str:
     quotes and escapes removed (``'kes''trel'``), and decoded ``-EncodedCommand`` payloads."""
     parts = [command, _dequote(command), *[p for p in _encoded_payloads(command) if p]]
     return "\n".join(dict.fromkeys(parts))
+
+
+# ------------------------------------------------------------------ files a command sends (G2.2, 2026-11-16)
+# A command can send a file's contents without naming them: `gh pr create --body-file F` put a restricted file
+# name into a pull request because the gate read only the command line. Commit and tag messages leave on the
+# next push, so `git commit` / `git tag` count as outbound too.
+GIT_OUT_RE = re.compile(r"(?<![\w-])git(?:\.exe)?\s+(?:-\S+\s+(?:\S+\s+)?)*?(?:commit|tag|notes)(?![\w-])", re.I)
+UPLOAD_MAX_BYTES = 5_000_000
+# options whose value is a file sent as is, per program (long forms also as --opt=value)
+_FILE_OPTS: dict[str, set[str]] = {
+    "gh": {"--body-file", "--notes-file", "--input", "--template"},
+    "curl": {"-T", "--upload-file"},
+    "wget": {"--post-file", "--body-file"},
+    "git": {"-F", "--file"},
+}
+# options whose value names a file with @: a leading @ (curl -d @F), name@F (curl --data-urlencode), or a form
+# field key=@F (curl -F, also key=<F; gh api -F)
+_LEAD_AT = {"curl": {"-d", "--data", "--data-binary", "--json"}}
+_NAME_AT = {"curl": {"--data-urlencode"}}
+_FORM_AT = {"curl": {"-F", "--form"}, "gh": {"-F", "--field"}}
+
+
+def _program(word: str) -> str:
+    return re.sub(r"\.exe$", "", word.replace("\\", "/").rsplit("/", 1)[-1].lower())
+
+
+def _file_args(words: list[str]) -> list[str]:
+    """The file arguments of one simple command whose contents the command sends."""
+    prog = _program(words[0]) if words else ""
+    plain = _FILE_OPTS.get(prog, set())
+    if prog == "gh" and len(words) > 1 and words[1].lower() == "api":
+        plain = {"--input"}                     # gh api -F key=value is a field, not a file
+    lead, named, form = _LEAD_AT.get(prog, set()), _NAME_AT.get(prog, set()), _FORM_AT.get(prog, set())
+    if prog == "git" and not any(w.lower() in ("commit", "tag", "notes") for w in words[1:]):
+        return []
+    out: list[str] = []
+    i = 1
+    while i < len(words):
+        w = words[i]
+        opt, eq, val = w.partition("=") if w.startswith("--") else (w, "", "")
+        if not eq:
+            val = words[i + 1] if i + 1 < len(words) else ""
+        step = 1 if eq else 2
+        m = None
+        if opt in lead:
+            m = re.match(r"@(.+)$", val)
+        elif opt in named:
+            m = re.match(r"(?:[^@=]*)@(.+)$", val)
+        elif opt in form:
+            m = re.match(r"[^=]+=[@<](.+)$", val) if prog == "curl" else re.match(r"[^=]+=@(.+)$", val)
+        if m and m.group(1) != "-":
+            out.append(m.group(1))
+            i += step
+            continue
+        if opt in form and prog == "gh" and plain != {"--input"} and val and "=" not in val and val != "-":
+            out.append(val)                     # gh pr create -F FILE is --body-file
+            i += step
+            continue
+        if opt in plain and val and val != "-":
+            out.append(val)
+            i += step
+            continue
+        i += 1
+    return out
+
+
+def uploaded_files(command: str, ps: bool, cwd: str | None,
+                   env: Mapping[str, str] | None = None) -> list[tuple[str, list[str] | None]]:
+    """For each file a command would send (``gh --body-file``, ``curl -d @F``, ``git commit -F`` ...), the word
+    as written and the absolute paths it may name, or None when it cannot be resolved (the caller denies:
+    fail closed). ``cd`` within the line moves the folder the later words resolve against."""
+    env = dict(os.environ) if env is None else env
+    found: list[tuple[str, list[str] | None]] = []
+    for sub in _subcommands(command):
+        found += uploaded_files(sub, ps, cwd, env)
+    here = cwd
+    for words in _split(command, ps):
+        if words and words[0].lower() in _CD_VERBS and len(words) >= 2:
+            got = _resolve(words[-1], here, env, {}, not ps)
+            here = got[0] if got else None
+            continue
+        for word in _file_args(words):
+            found.append((word, _resolve(word, here, env, {}, not ps)))
+    return found
 
 
 # ------------------------------------------------------------------ MCP tools

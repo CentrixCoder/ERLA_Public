@@ -393,7 +393,23 @@ def tier_for_url(url: str) -> str:
 DASHES = "‐‑‒–—―−-"     # hyphen last: literal inside a character class
 PN_RE = re.compile(rf"\b(?:P/?N|PART\s*(?:NO\b\.?|NUMBER|#))[:#.\s]*[\w{DASHES}]{{3,}}"
                    rf"|\b\d{{3,}}[{DASHES}]\d{{3,}}(?:[{DASHES}]\d+)?\b", re.I)
-EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+EMAIL_RE = re.compile(r"([\w.+-]+)@([\w-]+\.[\w.]+)")
+# Exempt matches (G2.2 false positives, 2026-11-17), everything else still counts as an address:
+# - a version reference: "actions/checkout@v5.1.0", "tool.git@v2.13.6", "left-pad@1.3.0" - two or three numeric
+#   parts, so an IP literal ("jane@10.0.0.1") still blocks;
+# - a role-only no-reply local part at a word boundary (the vendor's no-reply address in a commit's
+#   Co-Authored-By trailer). Exact match only: a personal GitHub no-reply alias ("<id>+<user>" local part),
+#   "noreply.jane" and "jane!noreply" local parts still block, and the domain still passes every term check.
+#   (No literal addresses here: the public edition's check refuses any in shipped code.)
+_VERSION_DOMAIN_RE = re.compile(r"v?\d+(?:\.\d+){1,2}\.?", re.I)
+NOREPLY_LOCAL = frozenset({"noreply", "no-reply", "no_reply", "donotreply", "do-not-reply", "do_not_reply"})
+
+
+def _is_address(text: str, m: re.Match[str]) -> bool:
+    if _VERSION_DOMAIN_RE.fullmatch(m.group(2)):
+        return False
+    bounded = m.start() == 0 or text[m.start() - 1] in " \t\r\n<:(\"'=,;["
+    return not (bounded and m.group(1).casefold() in NOREPLY_LOCAL)
 # an address spelled out to get past a filter: jane.doe(at)corp.com, jane.doe at corp-example dot com
 # (integrity attacks, 0.3.6); a plain "data at nasa.gov" is not an address and still passes
 EMAIL_SPELLED_RE = re.compile(
@@ -427,6 +443,24 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+(?:[-.][a-z0-9]+)*")
 MARKING_WORDS = frozenset({"itar", "export", "controlled", "control", "information", "proprietary", "confidential",
                            "company", "distribution", "statement", "limited", "unclassified", "restricted",
                            "sensitive", "internal", "eccn", "ear99", "distribute", "outside"})
+# Encoding, hash, protocol and platform names: letter-digit tokens that name no program, part or person. "base64"
+# occurred only in one flagged document and blocked every "| base64 -d" (G2.2 false positive, 2026-11-17). Exempt
+# only where the query writes one as a word of its own: "kq-sha256", "file.sha256" and a rejoined "arm 64" stay
+# candidates (adversarial review 2026-11-17). A restricted name spelled exactly like one of these, standing alone,
+# would pass: the owner's accepted trade-off.
+GENERIC_CODES = frozenset({
+    "base16", "base32", "base58", "base64", "base85", "md4", "md5", "sha1", "sha2", "sha3", "sha224", "sha256",
+    "sha384", "sha512", "crc16", "crc32", "crc64", "blake2", "blake3", "utf8", "utf16", "utf32", "latin1", "x509",
+    "pkcs7", "pkcs8", "pkcs12", "oauth2", "http2", "http3", "ipv4", "ipv6", "tls12", "tls13", "x86", "x64", "i386",
+    "i686", "amd64", "arm64", "aarch64", "armv7", "win32", "win64", "py3", "python3", "mp3", "mp4",
+    "h264", "h265", "ec2", "s3"})
+# Statement punctuation ends a phrase: split-code rejoining ("lc 447" -> "lc447") stays inside one, except that
+# letters followed by digits are still rejoined across it ("lc; 447" is a deliberate split). "head -120; ls"
+# became the code "120ls" and a PR body's "only); S9" became "onlys9" (2026-11-17). A line break is NOT a break:
+# commit messages and PR bodies wrap at 72 columns and can split "LC\n447". Only the decoded variants of
+# expand_outbound are kept apart (_outbound_variants).
+_STATEMENT_BREAK = re.compile(r"[;,()\[\]{}|&<>]")
+_CODE_SEPARATORS = re.compile(r"[^\w\s./-]")    # a rejoined code is written with only these between its runs
 
 
 def _normalize(text: str) -> str:
@@ -449,6 +483,11 @@ def _fold(text: str) -> str:
 def expand_outbound(text: str) -> str:
     """The text plus every decoded form a filter could otherwise miss: repeated URL decoding
     (``%255F``) and base64 tokens in a query or URL (integrity attacks, 0.3.6)."""
+    return "\n".join(_outbound_variants(text))
+
+
+def _outbound_variants(text: str) -> list[str]:
+    """expand_outbound's forms as a list: the text first, then each distinct decoded form."""
     out, cur = [text], text
     for _ in range(4):
         nxt = unquote_plus(cur)
@@ -470,7 +509,7 @@ def expand_outbound(text: str) -> str:
             if s and sum(ch.isprintable() for ch in s) / len(s) > 0.9:
                 out.append(s)
                 break
-    return "\n".join(dict.fromkeys(out))
+    return list(dict.fromkeys(out))
 
 
 def _term_in(t: str, q: str, qc: str | None = None) -> bool:
@@ -489,20 +528,31 @@ def _term_in(t: str, q: str, qc: str | None = None) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(t)}(?![a-z0-9])", q) is not None
 
 
-def _candidates(q: str) -> list[str]:
+def _candidates(q: str, segments: list[list[str]] | None = None, raw: str | None = None) -> list[str]:
     """Query words that could name something: words of 5+ letters, and codes with letters and digits
-    ("kestrel-9", "lc-447"); a material designation such as "7050-t7451" has one letter and is not one."""
+    ("kestrel-9", "lc-447"); a material designation such as "7050-t7451" has one letter and is not one.
+    ``segments``: per decoded variant, its folded phrases (split at _STATEMENT_BREAK); split codes are
+    rejoined within a phrase, and across a break only letters followed by digits. Without them the whole
+    query is one phrase. ``raw``: the query lower-cased but unfolded, to tell a GENERIC_CODES word standing
+    alone from one attached to a code; without it no generic code is exempt."""
     found: set[str] = set()
     words = _TOKEN_RE.findall(q)
     # a code written apart ("lc 447", "l c 447", "447 lc", "kestrel 9") is also tried joined; how it is
     # split or joined does not matter after that (_code_match)
     joined: list[str] = []
-    for i in range(len(words)):
-        for n in (2, 3):
-            part = words[i:i + n]
-            if len(part) == n and (all(len(w) <= 4 for w in part)
-                                   or (n == 2 and part[0].isalpha() and part[1].isdigit() and len(part[1]) <= 3)):
-                joined.append("".join(part))
+    for phrases in [[q]] if segments is None else segments:
+        prev = ""
+        for seg in phrases:
+            sw = _TOKEN_RE.findall(seg)
+            if prev.isalpha() and sw and sw[0].isdigit():
+                joined.append(prev + sw[0])             # across a break: "lc; 447"
+            for i in range(len(sw)):
+                for n in (2, 3):
+                    part = sw[i:i + n]
+                    if len(part) == n and (all(len(w) <= 4 for w in part) or (
+                            n == 2 and part[0].isalpha() and part[1].isdigit() and len(part[1]) <= 3)):
+                        joined.append("".join(part))
+            prev = sw[-1] if sw else ""
     codes: set[str] = set()
     for t in words + joined:
         for p in (t, *re.split(r"[-.]", t)):
@@ -511,8 +561,10 @@ def _candidates(q: str) -> list[str]:
                 found.add(p)
             elif letters >= 2 and digits and len(p) >= 4:
                 codes.add(p)
+    generic = {g for g in codes & GENERIC_CODES
+               if raw is not None and re.search(rf"(?<![\w.-]){re.escape(g)}(?![\w.-])", raw)}
     # codes first: they always name something, so a query padded with words cannot push one past the cap
-    return [*sorted(codes - MARKING_WORDS), *sorted(found - MARKING_WORDS)][:40]
+    return [*sorted(codes - MARKING_WORDS - generic), *sorted(found - MARKING_WORDS)][:40]
 
 
 def _code_match(tok: str) -> tuple[str, re.Pattern[str]]:
@@ -529,13 +581,14 @@ def _code_match(tok: str) -> tuple[str, re.Pattern[str]]:
 
 
 def _restricted_name(con: sqlite3.Connection, q: str, docs: list, flagged: set[int],
-                     allowed: set[str]) -> str | None:
+                     allowed: set[str], segments: list[list[str]] | None = None,
+                     raw: str | None = None) -> str | None:
     """G2.2 for single words and for names inside flagged documents (integrity attacks, 0.3.6): a query
     word that names something - a code with letters and digits, a word the flagged text always writes
     capitalised, or a word only in a flagged file name - and that occurs in a flagged document but in no
     unflagged one. Returns the flagged file it came from, or None. Generic words ("forging") pass: the
     flagged text writes them in lower case or unflagged documents use them too."""
-    for tok in _candidates(q):
+    for tok in _candidates(q, segments, raw):
         if tok in allowed:
             continue
         match, rx = _code_match(tok)
@@ -557,8 +610,20 @@ def _restricted_name(con: sqlite3.Connection, q: str, docs: list, flagged: set[i
         source = {r["doc_id"] for r in rows if r["doc_id"] in flagged} | {r["doc_id"] for r in named}
         if not source:
             continue
-        name_like = (any(c.isdigit() for c in tok) or (named and not occurrences)
-                     or bool(occurrences) and all(o[0].isupper() for o in occurrences))
+        if re.search(rf"(?<![a-z0-9]){re.escape(tok)}(?![a-z0-9])", q):
+            name_like = (any(c.isdigit() for c in tok) or (named and not occurrences)
+                         or bool(occurrences) and all(o[0].isupper() for o in occurrences))
+        else:
+            # a candidate the query wrote apart and _candidates rejoined ("kq 120", "checks 12", "21 of 21"):
+            # a name only where the flagged text writes it like one - every letter group capitalised ("KQ 120",
+            # "Kestrel 9") and nothing but space, hyphen, dot or slash between its runs. Prose in flagged
+            # documents ("checks 12", "21 of 21", a contents line "Strength Checks, 23") blocked "gh pr checks
+            # <n>" and a PR body's test count (LL-0077, 2026-11-17). A code typed joined keeps the rule above.
+            name_like = ((named and not occurrences)
+                         or bool(occurrences) and all(
+                             not _CODE_SEPARATORS.search(o)
+                             and all(run[0].isupper() for run in re.findall(r"[^\W\d_]+", o))
+                             for o in occurrences))
         if name_like:
             doc = next(r for r in docs if r["doc_id"] in source)
             return Path(doc["path"]).name
@@ -608,16 +673,19 @@ def web_query_check(query: str, con: sqlite3.Connection | None = None,
     reasons = []
     # decoded and normalised first: double URL encoding, base64, zero-width characters and look-alike
     # letters reach the same checks as plain text (integrity attacks, 0.3.6)
-    text = _normalize(expand_outbound(query))
+    variants = [_normalize(v) for v in _outbound_variants(query)]
+    text = "\n".join(variants)
     if PN_RE.search(text):
         reasons.append("contains a part-number-like token")
-    if EMAIL_RE.search(text) or EMAIL_SPELLED_RE.search(text):
+    if any(_is_address(text, m) for m in EMAIL_RE.finditer(text)) or EMAIL_SPELLED_RE.search(text):
         reasons.append("contains an email address")
     if con is not None:
         # separators folded on both sides: "secret_widget", "secret-widget", "secret widget" and a
         # URL's "secret+widget" are the same term (adversarial eval, 0.2.15)
         q = _fold(text)
         qc = q.replace(" ", "")
+        segments = [[s for s in (_fold(p) for p in _STATEMENT_BREAK.split(v)) if s] for v in variants]
+        raw = _plain(text).casefold()
         allowed = {_fold(a) for a in allow or []}
         # flagged documents and every member of their copy groups, whichever copy is the canonical
         # record (a renamed copy's file name identifies it as well; copies indexed before the next
@@ -625,16 +693,27 @@ def web_query_check(query: str, con: sqlite3.Connection | None = None,
         groups = copy_group_flags(con)
         docs = con.execute("SELECT doc_id, path, title, classification_flag FROM documents").fetchall()
         rows = [r for r in docs if r["classification_flag"] or r["doc_id"] in groups]
+        in_rows = {r["doc_id"] for r in rows}
+        # The name of an UNREADABLE flagged file (flag UNKNOWN: no marking was ever seen, it is only held local
+        # until read) is not a term when it is a single plain word that an unflagged file also has as its whole
+        # file name: "template.ppt" blocked every "template" beside an unflagged "Template.xls" (2026-11-17).
+        # Narrow on purpose: a marked document's name (a single-word program name such as "Osprey"), any
+        # multi-word or digit-bearing name, and auto-derived titles never qualify - on the owner's site a rule
+        # for every name freed 38 names, among them program and report titles (adversarial review 2026-11-17).
+        stems_unflagged = {s for r in docs if r["doc_id"] not in in_rows
+                           for s in (_fold(Path(r["path"]).stem),) if re.fullmatch(r"[a-z]+", s)}
         for r in rows:
             stem, title = _fold(Path(r["path"]).stem), _fold(r["title"] or "")
             if _PLACEHOLDER_TITLE_RE.fullmatch(title):
                 title = ""                              # a placeholder title names nothing; the stem still does
+            unread = effective_flag(r["classification_flag"], r["doc_id"], groups) == "UNKNOWN"
+            namesakes = stems_unflagged if unread else set()
             for t in (stem, title):
-                if t and t not in allowed and _term_in(t, q, qc):
+                if t and t not in allowed and t not in namesakes and _term_in(t, q, qc):
                     reasons.append(f"contains a term from a flagged document ({Path(r['path']).name})")
                     break
         if not reasons:
-            source = _restricted_name(con, q, docs, {r["doc_id"] for r in rows}, allowed)
+            source = _restricted_name(con, q, docs, in_rows, allowed, segments, raw)
             if source:
                 reasons.append(f"contains a name or code found only in a flagged document ({source})")
     return reasons

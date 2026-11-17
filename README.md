@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.2-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-1.0.3-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 [![Status: production](https://img.shields.io/badge/status-production-brightgreen.svg)](#status)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
@@ -17,6 +17,14 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 1.0.3
+
+- **Web check, files a command sends:** a file whose contents a command sends (a pull-request description file,
+  an upload) and commit messages are checked like the command itself.
+- **Web check, fewer false blocks:** version references, encoding and platform names, numbered commands and
+  no-reply commit trailers no longer block; restricted names and codes still do.
+- **Upgrade:** quit and reopen the Claude app.
+
 ### 1.0.2
 
 - **Web check, fewer false blocks:** a restricted document's placeholder title (such as "Document:") no longer
@@ -32,23 +40,6 @@ Updated automatically at every release; older versions are listed under
   verifies; a value claimed for the wrong direction still fails.
 - **Upgrade:** quit and reopen the Claude app and run `erla refresh`; PDF tables are re-read within each
   refresh's time budget.
-
-### 1.0.0
-
-- **Production release.** The free core edition stays MIT licensed.
-- **Every reported value is checked in code before it leaves ERLA:** a packet is logged or exported only when a
-  passed value check covers its values, and one that says every value is verified while citing a check that did
-  not pass is refused. In Claude Code, a chat answer with an unchecked number is sent back once, then you are
-  warned.
-- **Handbook tables keep their row and column labels:** rotated pages, headings over column groups or stacked
-  over several rows, and borderless tables with stacked fractions are read correctly, so more table values
-  verify. A direction must match in order (`L-T` is not `T-L`).
-- **When a value cannot be confirmed, the check says why:** which claimed words the row does not print, where
-  they are (a column heading, the caption, a footnote), and the labels it found.
-- **Web gate** also covers network commands run in a shell and browser tools, and still fails closed.
-- **Search filters** find documents ranked below the first candidates.
-- **Upgrade:** after updating, quit and reopen the Claude app and run `erla refresh`. Tables in PDFs are re-read
-  within each refresh's time budget, so a large library may need more than one refresh.
 
 <!-- release-notes:end -->
 
@@ -222,7 +213,7 @@ in a Claude Code session (desktop app **Code** tab or terminal), not in a claude
 <!-- public:begin status -->
 ## Status
 
-**Production (1.0.2).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
+**Production (1.0.3).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
 every value it reports against its cited source with `verify_packet`, which re-opens the source and checks
 the value in code. The server enforces this where it records a packet: `log_request` and `export_packet`
 refuse a packet that reports values unless a passed `verify_packet` check from the same server session

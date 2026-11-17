@@ -229,6 +229,18 @@ def decide(payload: dict[str, Any]) -> str | None:
     if text is None or not text.strip():
         return None
     what = {"WebSearch": "search query", "WebFetch": "URL"}.get(tool, "command or browser request")
+    if shell is not None:
+        # the contents of files the command sends (gh --body-file, curl -d @F, git commit -F), G2.2 2026-11-16
+        cwd = payload.get("cwd")
+        sent, problem = _uploaded_text(shell[0], shell[1], cwd if isinstance(cwd, str) and cwd else None)
+        if problem:
+            _log(cfg, {"cmd": "hook.webcheck", "tool": tool, "verdict": "BLOCKED", "gate": "G2.2-file",
+                       "agent_id": payload.get("agent_id")})
+            return (f"ERLA web gate (G2): this command was not sent: it sends the file {problem}, which the gate "
+                    "could not read to check. Use a file the gate can read (a text file under 5 MB, an absolute "
+                    "path or one relative to a known folder), or put the text in the command.")
+        if sent:
+            text = text + "\n" + sent
     shadow = shadow_library(text)
     if shadow:
         _log(cfg, {"cmd": "hook.webcheck", "tool": tool, "verdict": "BLOCKED", "gate": "G5.4",
@@ -256,6 +268,25 @@ def decide(payload: dict[str, Any]) -> str | None:
             "Rewrite it with generic technical terms only (no part numbers, program or customer names, "
             "emails, or file names and titles of restricted documents) and try again; if the term is "
             "essential, answer from the local library and report the gap.")
+
+
+def _uploaded_text(command: str, ps: bool, cwd: str | None) -> tuple[str, str | None]:
+    """(the text of every file the command sends, the first file that could not be read or None). A file the
+    gate cannot resolve or read, or one over the size cap, is a problem: the caller denies (fail closed)."""
+    texts: list[str] = []
+    for word, paths in shellgate.uploaded_files(command, ps, cwd):
+        if not paths:
+            return "", f"'{word}' (its folder is not known)"
+        for p in paths:
+            try:
+                size = os.path.getsize(p)
+                if size > shellgate.UPLOAD_MAX_BYTES:
+                    return "", f"'{word}' ({size} bytes, over the {shellgate.UPLOAD_MAX_BYTES}-byte check limit)"
+                with open(p, "rb") as fh:
+                    texts.append(fh.read().decode("utf-8", errors="replace"))
+            except OSError:
+                return "", f"'{word}' (it could not be opened)"
+    return "\n".join(texts), None
 
 
 def _log(cfg: Any, record: dict[str, Any]) -> None:
