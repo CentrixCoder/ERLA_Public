@@ -730,7 +730,7 @@ def cmd_refs(a) -> int:
 
 
 def cmd_embed(a) -> int:
-    from .embed import embed_pending, export_matrix, prune_duplicate_embeddings, vector_backend
+    from .embed import embed_pending, export_index, prune_duplicate_embeddings, vector_backend
     cfg = _cfg()
     if not cfg.embeddings.get("enabled"):
         sys.exit("embeddings disabled in config")
@@ -740,7 +740,7 @@ def cmd_embed(a) -> int:
         con = _con(cfg, write=True)
         p = prune_duplicate_embeddings(con)
         n = embed_pending(con, cfg, limit=a.limit, log=_out, progress=beat)
-        m = export_matrix(con, cfg, progress=beat)
+        m = export_index(con, cfg, progress=beat)
         _out(f"pruned {p} duplicate-document vectors; embedded {n} new chunks; "
              f"vector index rows: {m} ({vector_backend(cfg)})")
         from . import sparse

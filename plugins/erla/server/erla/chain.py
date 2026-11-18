@@ -74,13 +74,13 @@ def run_chain(cfg: Config, *, full: bool = False, ocr_inline: bool = False, run_
         summary["tables"] = {k: v for k, v in res.items() if k != "failures"}
 
     if run_embed and cfg.embeddings.get("enabled"):
-        from .embed import embed_pending, export_matrix, prune_duplicate_embeddings
+        from .embed import embed_pending, export_index, prune_duplicate_embeddings
         phase("embed")
         con = store.connect_writer(cfg)
         try:
             summary["pruned_duplicate_embeddings"] = prune_duplicate_embeddings(con)
             summary["embedded_chunks"] = embed_pending(con, cfg, limit=None, log=log, progress=heartbeat)
-            summary["vector_index"] = export_matrix(con, cfg, progress=heartbeat)
+            summary["vector_index"] = export_index(con, cfg, progress=heartbeat)
         finally:
             con.close()
     from . import sparse

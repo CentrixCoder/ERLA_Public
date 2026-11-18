@@ -323,6 +323,10 @@ def delete_document(con: sqlite3.Connection, doc_id: int) -> None:
         # SQLite gives freed chunk ids to the next chunks written, so an exported vector index made before this
         # delete maps old vectors onto new text until it is rebuilt (embed.vector_mismatch reads this)
         set_meta(con, "chunks_deleted_at", repr(time.time()))
+        # the exact record (2026-11-17): a counter, compared with the value the export saw. chunks_deleted_at
+        # against the export file's mtime mixed two clocks, and on Windows a delete milliseconds after an export
+        # could compare as older (the test flaked 2 runs in 5); it is kept only for exports made before this
+        set_meta(con, "chunks_delete_seq", str(int(get_meta(con, "chunks_delete_seq") or 0) + 1))
     con.execute("DELETE FROM embeddings WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks)")
     if has_table(con, "sparse_vectors"):
         con.execute("DELETE FROM sparse_vectors WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks)")

@@ -321,6 +321,24 @@ def export_matrix(con, cfg, progress=None) -> int:
     return rows
 
 
+def export_index(con, cfg, progress=None) -> int:
+    """export_matrix, plus the delete counter it started from (``vector_delete_seq``), for vector_mismatch.
+
+    The counter is read before any vector is, so a delete while the export runs leaves the new index marked
+    stale. Kept outside export_matrix on purpose (owner decision 2026-11-17): export_matrix is a registered
+    ranking function (docs/decisions/ranking_evidence.yaml) and this bookkeeping does not change a ranking.
+    Every export goes through here (chain.py, cli.py); export_matrix alone records no counter, and
+    vector_mismatch then falls back to the timestamp comparison."""
+    from . import store
+    has_meta = store.has_table(con, "meta")
+    seq = (store.get_meta(con, "chunks_delete_seq") or "0") if has_meta else "0"
+    rows = export_matrix(con, cfg, progress=progress)
+    if has_meta:
+        store.set_meta(con, "vector_delete_seq", seq)
+        con.commit()
+    return rows
+
+
 _CACHE: dict = {}
 
 
@@ -372,14 +390,17 @@ def vector_mismatch(cfg, con) -> str | None:
         return f"vector index built with {built}, site model is {model_name(cfg)}: run erla refresh"
     # chunks deleted after the export: their ids may now belong to other text (correctness audit 2026-10-31: an
     # unrelated document ranked first on a deleted document's vector until the next export)
+    stale = "chunks changed since the vector index was built: vectors resume after the next erla refresh"
+    seen = store.get_meta(con, "vector_delete_seq")
+    if seen is not None:                  # exact: the delete counter now against the one the export started from
+        return stale if (store.get_meta(con, "chunks_delete_seq") or "0") != seen else None
+    # an export made before 2026-11-17 recorded no counter: compare times (two clocks, so not exact)
     try:
         deleted = float(store.get_meta(con, "chunks_deleted_at") or 0)
         exported = paths(cfg)[1].stat().st_mtime
     except (OSError, ValueError):
         return None
-    if deleted > exported:
-        return "chunks changed since the vector index was built: vectors resume after the next erla refresh"
-    return None
+    return stale if deleted > exported else None
 
 
 def _dedupe(pairs, top: int) -> list[tuple[int, float]]:
