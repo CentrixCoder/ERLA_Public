@@ -21,6 +21,15 @@ Item kinds:
             Without a run it needs ``not_covered`` (why no tool applies): status COMPUTED, model
             arithmetic not checked by code. Neither: FAIL - a hand calculation cannot pass silently.
             Verify each input as its own value item either way.
+  claim     a sentence of the answer (2026-11-18, ADR-0006): ``text`` (without its [S#] tags) and ``sources``, one to
+            three {doc_id, locator, tag} (or doc_id + locator + tag for one). erla.attribution decides support in code:
+            PASS when every number, identifier, acronym, property symbol, direction and basis of the sentence is printed
+            in the cited text and enough of its content words are; FAIL when one is not (a swapped temper, alloy,
+            standard or number); UNCONFIRMED when the sentence has nothing code can check or few of its words are
+            printed (a paraphrase). A PASS checks terms, not meaning. Each source gets ``irrelevant`` (ALCE precision),
+            and ``supporting`` lists the sentences a ContextCite-style ablation over the re-ranker scores highest
+            (display only; ``attribute: false`` skips it). Claims carry no reported values: packetgate does not count
+            them as verified values.
 
 Conditions (0.2.16): a value item may claim ``temper`` (or ``condition``), ``direction``, ``basis``,
 ``thickness`` and ``form``. The value must then belong to those conditions in the property records at
@@ -70,7 +79,8 @@ RULE = ("Report as verified only items with status PASS. FAIL: correct the value
         "confirms it; its `fix` says which claimed words the row does not print and where they are. A computed "
         "value passes only against a recorded calc run (calc_id + calc_output); COMPUTED (not_covered) "
         "is model arithmetic: show the equation, say why the calc tool did not apply, and verify each input as its own "
-        "item. Carry every warning into the packet "
+        "item. A claim (a sentence of section A with its [S#] tags) is shown only when it is PASS; FAIL: correct it; "
+        "UNCONFIRMED: mark its line NOT VERIFIED or restate it in the source's terms. Carry every warning into the packet "
         "(OCR values: mark OCR, lower confidence, recommend visual check, G3.5; flagged: label, G2.4). "
         "Pass verification_id to log_request.")
 
@@ -795,12 +805,131 @@ def _check_chart(con: sqlite3.Connection, cfg: Any, item: dict[str, Any], res: d
         res.update(status="FAIL", reason=f"{v:g} is not the chart's {y:.4g} +/- {dy:.2g} at x = {x:g}")
 
 
+MAX_ATTRIBUTED = 4      # claims per verify_packet call that get the ablation attribution (about 32 scorings each)
+CLAIM_WARNING = ("code checked that the sentence's terms are printed in the cited text, not what the sentence says "
+                 "about them (a negated or reversed statement with the same terms passes): read it against the source")
+
+
+def _claim_sources(item: dict[str, Any]) -> list[dict[str, Any]] | str:
+    """The claim's sources as [{doc_id, locator, tag}], or the reason they are not usable."""
+    raw = item.get("sources")
+    if raw is None:
+        raw = [{"doc_id": item.get("doc_id"), "locator": item.get("locator"), "tag": item.get("tag")}]
+    if not isinstance(raw, list) or not raw:
+        return "a claim needs sources: [{doc_id, locator, tag}] (one to three) or doc_id + locator"
+    from .attribution import MAX_CITATIONS
+    if len(cast(list[Any], raw)) > MAX_CITATIONS:
+        return f"a claim cites at most {MAX_CITATIONS} sources (ALCE); split the sentence"
+    out: list[dict[str, Any]] = []
+    for s in cast(list[Any], raw):
+        if not isinstance(s, dict):
+            return "each source is {doc_id, locator, tag}"
+        src = cast(dict[str, Any], s)
+        try:
+            out.append({"doc_id": int(src["doc_id"]), "locator": str(src["locator"]),
+                        "tag": str(src.get("tag") or "").strip() or None})
+        except (KeyError, TypeError, ValueError):
+            return "each source needs doc_id and locator"
+    return out
+
+
+def _check_claim(con: sqlite3.Connection, docs: dict[int, _Doc], groups: Any, item: dict[str, Any],
+                 res: dict[str, Any], attribute: bool, cfg: Any) -> None:
+    """A sentence against its cited text (ADR-0006): erla.attribution.support over the cited chunks together."""
+    from . import attribution
+    text = attribution.strip_tags(str(item.get("text") or ""))
+    if not text:
+        res.update(status="FAIL", reason="claim item without text (the sentence, without its [S#] tags)")
+        return
+    res["text"] = text
+    sources = _claim_sources(item)
+    if isinstance(sources, str):
+        res.update(status="FAIL", reason=sources)
+        return
+    passages: list[str] = []
+    selected: list[list[sqlite3.Row]] = []
+    shown: list[dict[str, Any]] = []
+    for src in sources:
+        doc = docs.get(src["doc_id"]) or docs.setdefault(src["doc_id"], _Doc(con, src["doc_id"]))
+        if doc.row is None:
+            res.update(status="FAIL", reason=f"document {src['doc_id']} not in the index", sources=shown)
+            return
+        flag = effective_flag(doc.row["classification_flag"], src["doc_id"], groups)
+        if flag:
+            res.setdefault("flag", flag)
+            res["warnings"].append(f"FLAGGED {flag}: label it, local-only (G2.4)")
+        sel = doc.at(src["locator"])
+        if not sel:
+            res.update(status="FAIL", reason=f"locator '{src['locator']}' not found in document {src['doc_id']}",
+                       available=[r["locator"] for r in doc.chunks[:20]], sources=shown)
+            return
+        for r in sel:
+            res["warnings"] += [w for w in _quality(doc, r, None) if w not in res["warnings"]]
+        passages.append("\n".join(str(r["text"] or "") for r in sel))
+        selected.append(sel)
+        shown.append({**src, "title": doc.row["title"]})
+    verdict = attribution.support(text, passages)
+    res.update(sources=shown, anchors=verdict["checked"], coverage=verdict["coverage"])
+    for s, bad in zip(shown, attribution.irrelevant(text, passages)):
+        s["irrelevant"] = bad
+        if bad:
+            res["warnings"].append(f"source {s['tag'] or s['doc_id']} adds no support the others do not give "
+                                   "(ALCE: irrelevant citation): drop it")
+    if verdict["verdict"] == "unsupported":
+        res.update(status="FAIL", reason=verdict["reason"] + ": correct the sentence or cite the text that prints them",
+                   missing=verdict["missing"])
+        near = [r for src, sel in zip(sources, selected) for r in docs[src["doc_id"]].near(sel)]
+        there = [str(r["locator"]) for r in near
+                 if attribution.support(text, [*passages, str(r["text"] or "")])["verdict"] == "supported"]
+        if there:
+            res["reason"] += f" (the next chunk {there[0]} prints them: cite it as a source)"
+        return
+    if verdict["verdict"] == "unknown":
+        res.update(status="UNCONFIRMED", reason=verdict["reason"] + ": report the sentence NOT VERIFIED by code, or "
+                   "restate it in the source's own terms and cite the text that prints them")
+        return
+    res.update(status="PASS", evidence=verdict["reason"])
+    res["warnings"].append(CLAIM_WARNING)
+    if not attribute or item.get("attribute") is False:
+        return
+    _attribute(cfg, text, passages, res)
+
+
+def _attribute(cfg: Any, text: str, passages: list[str], res: dict[str, Any]) -> None:
+    """The ContextCite-style proxy (erla.attribution.ablation_scores) over the cited sentences, scored by the site's
+    re-ranker. Display only; a skipped run says why (L10)."""
+    from . import attribution
+    from . import rerank as _rerank
+    rerank: Any = _rerank                # rerank.py is not in the strict list: its cfg parameters are untyped
+    if cfg is None or not rerank.enabled(cfg):
+        res["attribution"] = "not run: re-ranking is off for this site (rerank.enabled)"
+        return
+    units = attribution.pick_sentences(text, [u for p in passages for u in attribution.sentences(p)])
+    used: list[str] = []
+
+    def scorer(query: str, texts: list[str]) -> list[float]:
+        scores, key = rerank.score(cfg, query, texts)
+        used.append(key)
+        return scores
+
+    try:
+        weights = attribution.ablation_scores(text, units, scorer)
+    except Exception as exc:           # an aid, never a gate: a failed run is reported, the status stands
+        res["attribution"] = f"not run: {type(exc).__name__}: {str(exc)[:120]}"
+        return
+    res["supporting"] = attribution.top(units, weights)
+    res["attribution"] = (f"ContextCite-style ablation ({attribution.N_ABLATIONS} random ablations of {len(units)} "
+                          f"sentences, LASSO alpha {attribution.LASSO_ALPHA}) scored by the {used[0] if used else '?'} "
+                          "re-ranker: a proxy (HYPOTHESIS, ADR-0006), display only")
+
+
 def verify_items(con: sqlite3.Connection, items: list[dict[str, Any]],
                  calc_runs: dict[str, dict[str, Any]] | None = None, cfg: Any = None) -> dict[str, Any]:
     """``calc_runs``: calculation runs recorded by the server (erla.calcrun), by calc_id."""
     results: list[dict[str, Any]] = []
     docs: dict[int, _Doc] = {}
     groups = copy_group_flags(con)       # G2.5: copies carry their copy group's flag
+    attributed = 0
     for i, raw in enumerate(items):
         item = dict(raw)
         kind = str(item.get("kind") or "value")
@@ -816,8 +945,15 @@ def verify_items(con: sqlite3.Connection, items: list[dict[str, Any]],
         if kind == "chart":
             _check_chart(con, cfg, item, res)
             continue
+        if kind == "claim":
+            _check_claim(con, docs, groups, item, res, attributed < MAX_ATTRIBUTED, cfg)
+            if "supporting" in res:
+                attributed += 1
+            elif res.get("status") == "PASS" and item.get("attribute") is not False and "attribution" not in res:
+                res["attribution"] = f"not run: at most {MAX_ATTRIBUTED} claims per call get the attribution"
+            continue
         if kind not in ("value", "quote"):
-            res.update(status="FAIL", reason=f"unknown kind {kind!r} (value, quote, computed, chart)")
+            res.update(status="FAIL", reason=f"unknown kind {kind!r} (value, quote, computed, chart, claim)")
             continue
         try:
             doc_id = int(item["doc_id"])

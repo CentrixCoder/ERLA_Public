@@ -77,7 +77,7 @@ Scope: local | web | both    Index date: <YYYY-MM-DD>    Search budget used: <n 
 Expanded queries: <list>
 
 ### A. Answer
-<direct answer, "NOT FOUND in searched scope", or "UNRESOLVED - no solution can be established from the available sources" (W9 step 4a)>
+<direct answer, "NOT FOUND in searched scope", or "UNRESOLVED - no solution can be established from the available sources" (W9 step 4a); each factual sentence ends with 1-3 [S#] tags of its sources>
 
 ### B. Extracted Values
 | # | Quantity | Value | Units | Conditions / Basis | Source ID | Locator | Tier | Confidence | Corroborated |
@@ -107,6 +107,8 @@ Verdict: PASS | PASS WITH FINDINGS | FAIL (after <n> rework rounds) | NOT RUN (<
 ### Citations
 [S1] Author/Org, *Title*, edition/rev, year, locator. Path: <local path> | URL: <url> (retrieved YYYY-MM-DD)
 ```
+
+Sentence citations in §A (ADR-0006, the ALCE format): every factual sentence of §A carries one to three `[S#]` tags, each listed under Citations, and is verified as a `claim` item with those sources (MCP_MODE step 5); the sentence is shown exactly as verified. Exempt: sentences under four words, lines labelled NOT VERIFIED, sentences labelled ESTIMATE, ASSUMPTION or COMPUTED (a calculation tool's result, verified as a value), packet header lines (Scope, Query, Index date), and short pointers to another section (ten words or fewer, no number). An UNCONFIRMED claim is labelled NOT VERIFIED or restated in the source's own terms. §A must agree with §B, two §B rows for the same quantity and conditions must not differ unless §D names both values, and a value is reported for the quantity it was verified for; the answer gate checks all of this when the turn ends.
 
 EPUB: locator = the printed page `p.<n>` when the book has a page-list, else `item <n> §<heading>` (spine position and section heading); add the ISBN when known.
 

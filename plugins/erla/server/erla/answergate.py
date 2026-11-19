@@ -24,6 +24,16 @@ Exempt: a number in a user request of the session (an input, not a reported valu
 row that says NOT VERIFIED (rules: a FAIL value may be reported so), page, table, figure, section, equation,
 revision and document numbers, and an answer that starts NOT FOUND or UNRESOLVED.
 
+Claims and consistency (2026-11-18, ADR-0006; owner decision: a gate). In a Result Packet's section A, every factual
+sentence carries one to three ``[S#]`` tags (rules section 6, ALCE's format); each tag is listed under Citations; and
+the sentence, tags and markup removed, equals the text of a PASS ``claim`` item of a ``verify_packet`` of the session
+whose sources carry those tags. Exempt: sentences under four words, lines labelled NOT VERIFIED, sentences labelled
+ESTIMATE, ASSUMPTION or COMPUTED or naming a calculation tool or calc_id (their values are gated as values), packet
+header lines (Scope, Query, Index date), and pointers of ten words or fewer to a packet section with no digit. The answer must also agree with itself and with what was verified: section A's
+``Q = v`` for a property symbol Q matches a section B row for Q when B has one; two section B rows with the same
+quantity, conditions and units hold the same value unless section D names both values (G3.4); and a value whose
+covering verified items all claimed another property symbol is not reported as this one.
+
 A Stop hook cannot take back text already on the screen. On a miss the hook blocks the stop once, so the agent
 verifies the values or restates them as NOT VERIFIED before the turn ends. When the turn is already a continuation
 (``stop_hook_active``) and values are still uncovered, the turn ends with a warning shown to the user listing them,
@@ -76,6 +86,29 @@ LOCATOR_BEFORE = re.compile(r"(?:\bp|\bpp|\bpage|\btable|\bfig|\bfigure|\bsectio
                             r"\bref|\bdoc(?:_id)?|\bchapter|\bch|\bno|#|\bstep|\bitem|\bv)[ \t.:]*$", re.I)
 
 MAX_LISTED = 8
+
+# claims (ADR-0006): TAG is erla.attribution.TAG (tests/test_claim_gate.py checks they stay equal)
+TAG = re.compile(r"\[\s*(S\d+(?:\s*[,;]\s*S?\d+)*)\s*\]")
+CITATION_LINE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*(S\d+)\s*\]", re.M)
+EXEMPT_LABEL = re.compile(r"\b(?:NOT\s+VERIFIED|UNVERIFIED|ESTIMATE|ASSUMPTIONS?|ASSUMED|COMPUTED)\b|"
+                          r"^\s*(?:\*\*)?\s*Assumptions?\b|\b(?:dt|joint|stress)_calc\b|\bcalc_id\b|\bunit_convert\b")
+POINTER = re.compile(r"\b(?:sections?|table)\s+[A-G]\b|\bsee\s+[A-G]\b|\bbelow\b|\babove\b", re.I)
+ABBREV = re.compile(r"\b(?:e\.g|i\.e|fig|figs|eq|eqs|no|nos|ref|refs|vs|approx|ca|cf|al|vol|sec|ch|pp|p|min|max|"
+                    r"incl|resp|etc)\.$", re.I)
+SPLIT = re.compile(r"[.!?](?:\s*\[\s*S\d[^\]]*\])*(?=\s+(?:[(A-Z0-9]|\[(?!\s*S\d)))")
+MIN_WORDS = 4
+POINTER_MAX_WORDS = 10        # "See section B." is a pointer; a factual clause with "see section B" attached is not
+META_LINE = re.compile(r"^\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:Scope|Query|Index(?:\s+date)?|Search budget|Expanded queries|"
+                       r"Protocol review|Check policy)\b", re.I)
+SYMBOL = re.compile(r"(?<![\w-])(Ftu|Fty|Fcy|Fsu|Fbru|Fbry|KIc|KIC|KIscc|Kc|Ec|E|G)(?![\w-])")
+PHRASE = ((re.compile(r"\b(?:ultimate tensile|tensile ultimate)\b", re.I), "Ftu"),
+          (re.compile(r"\btensile yield\b", re.I), "Fty"), (re.compile(r"\bcompressive yield\b", re.I), "Fcy"),
+          (re.compile(r"\b(?:ultimate shear|shear ultimate)\b", re.I), "Fsu"),
+          (re.compile(r"\b(?:ultimate bearing|bearing ultimate)\b", re.I), "Fbru"),
+          (re.compile(r"\b(?:bearing yield|yield bearing)\b", re.I), "Fbry"))
+BINDING = re.compile(r"(?<![\w-])(Ftu|Fty|Fcy|Fsu|Fbru|Fbry|KIc|KIC|KIscc|Kc|Ec|E|G)(?![\w-])[^=≈\n]{0,40}?[=≈][ \t]*")
+GROUP_HEADS = ("quantity", "condition", "basis", "unit", "material", "temper", "form", "direction", "thickness",
+               "temperature")
 
 
 def numbers(text: str) -> list[tuple[float, int, int, str]]:
@@ -301,6 +334,282 @@ def unverified(text: str, covered: list[float], inputs: str) -> list[tuple[str, 
     return missing
 
 
+# --- claims (ADR-0006) ----------------------------------------------------------------------------------------
+
+def claim_key(text: str) -> str:
+    """A sentence as the gate compares it: tags, markdown emphasis, case, quote and dash styles and spacing removed."""
+    s = TAG.sub(" ", text)
+    s = re.sub(r"[*_`]", "", s).lower()
+    s = s.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+    s = s.replace("–", "-").replace("—", "-").replace("−", "-")
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\s+([.,;:!?])", r"\1", s)
+    return s.rstrip(".;:!? ")
+
+
+def tags_of(text: str) -> list[str]:
+    """The [S#] tags of a sentence in order: '[S1, S3]' and '[S1][S3]' give ['S1', 'S3'] (as erla.attribution.tags)."""
+    out: list[str] = []
+    for m in TAG.finditer(text):
+        for t in re.split(r"\s*[,;]\s*", m.group(1)):
+            t = "S" + (t[1:] if t.upper().startswith("S") else t).strip()
+            if t not in out:
+                out.append(t)
+    return out
+
+
+def _split(text: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    for m in SPLIT.finditer(text):
+        if ABBREV.search(text[start:m.start() + 1]):
+            continue
+        parts.append(text[start:m.end()].strip())
+        start = m.end()
+    parts.append(text[start:].strip())
+    return [p for p in parts if p]
+
+
+def sentences(text: str) -> list[str]:
+    """Prose sentences of a section (table rows and headings left out; list items and paragraphs split after . ! ?
+    before a capital, a digit or a bracket, not after common abbreviations). The prose rule of
+    erla.attribution.sentences, which tests/test_claim_gate.py compares."""
+    out: list[str] = []
+    para: list[str] = []
+    for line in [*text.splitlines(), ""]:
+        s = line.strip()
+        if not s or s.startswith("|") or s.startswith("#") or re.match(r"^(?:[-*•]|\d+[.)])\s+", s):
+            if para:
+                out += _split(" ".join(para))
+                para = []
+            if s and not s.startswith("|") and not s.startswith("#"):
+                out += _split(re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", s))
+            continue
+        para.append(s)
+    return out
+
+
+def needs_citation(sentence: str) -> bool:
+    """A factual sentence of section A: four words or more, not labelled NOT VERIFIED, ESTIMATE, ASSUMPTION or
+    COMPUTED, not naming a calculation tool, and not a pointer to another section with no digit in it."""
+    words = len(re.findall(r"[A-Za-z0-9]+", TAG.sub(" ", sentence)))
+    if words < MIN_WORDS or EXEMPT_LABEL.search(sentence):
+        return False
+    return not (words <= POINTER_MAX_WORDS and POINTER.search(sentence) and not re.search(r"\d", TAG.sub(" ", sentence)))
+
+
+def claim_prose(section_a: str) -> str:
+    """Section A without the lines no claim check reads: lines labelled NOT VERIFIED (the label covers its line) and
+    packet header lines (Scope, Query, Index date, ...), which describe the search, not the library."""
+    return "\n".join(ln for ln in section_a.splitlines() if not UNVERIFIED_LINE.search(ln) and not META_LINE.match(ln))
+
+
+def verified_claims(entries: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Each claim item of the transcript's verify_packet results: {'key', 'tags', 'status'} (from the call's input,
+    paired with the result's status by position)."""
+    entries = list(entries)
+    calls: dict[str, list[Any]] = {}
+    for ev in entries:
+        for b in _blocks(ev):
+            if b.get("type") == "tool_use" and VERIFY.search(str(b.get("name") or "")):
+                calls[str(b.get("id"))] = _list(_dict(b.get("input")).get("items"))
+    out: list[dict[str, Any]] = []
+    for ev in entries:
+        for b in _blocks(ev):
+            tid = str(b.get("tool_use_id"))
+            if b.get("type") != "tool_result" or tid not in calls or b.get("is_error"):
+                continue
+            try:
+                res = _dict(json.loads(_result_text(b)))
+            except ValueError:
+                continue
+            for k, raw in enumerate(_list(res.get("items"))):
+                item = _dict(raw)
+                given = _dict(calls[tid][k]) if k < len(calls[tid]) else {}
+                if item.get("kind") != "claim" or str(given.get("kind") or "") != "claim":
+                    continue
+                srcs = _list(given.get("sources")) or [given]
+                tags = {str(_dict(s).get("tag") or "").strip().upper() for s in srcs} - {""}
+                out.append({"key": claim_key(str(given.get("text") or "")), "tags": tags,
+                            "status": str(item.get("status") or "")})
+    return out
+
+
+def unverified_claims(text: str, claims: list[dict[str, Any]]) -> list[str]:
+    """What is wrong with the citations of section A of a Result Packet (empty when nothing is)."""
+    sec = _sections(text)
+    if "A" not in sec or NO_ANSWER.search(text.strip().split("\n", 1)[0]) or \
+            NO_ANSWER.search(sec["A"].strip().split("\n", 1)[0]):
+        return []
+    listed = set(CITATION_LINE.findall(text))
+    problems: list[str] = []
+    for sent in sentences(claim_prose(sec["A"])):
+        tags = tags_of(sent)
+        short = TAG.sub("", sent).strip()[:90]
+        if not tags:
+            if needs_citation(sent):
+                problems.append(f"no [S#] tag: '{short}'")
+            continue
+        if len(tags) > 3:
+            problems.append(f"more than three tags (split the sentence): '{short}'")
+        phantom = [t for t in tags if t not in listed]
+        if phantom:
+            problems.append(f"{', '.join(phantom)} not listed under Citations: '{short}'")
+        if EXEMPT_LABEL.search(sent):
+            continue
+        key = claim_key(sent)
+        same = [c for c in claims if c["key"] == key]
+        if not same:
+            problems.append(f"not verified as a claim (or changed since): '{short}'")
+        elif not any(c["status"] == "PASS" for c in same):
+            problems.append(f"its claim check did not pass ({'/'.join(sorted({c['status'] for c in same}))}): '{short}'")
+        elif not any(c["status"] == "PASS" and set(tags) == c["tags"] for c in same):
+            # exactly the verified set: sources that support a sentence together may not support it apart
+            problems.append(f"{', '.join(tags)} not the tags of the sources it was verified against "
+                            f"({' / '.join(', '.join(sorted(c['tags'])) for c in same if c['status'] == 'PASS')}); "
+                            f"show the tags it was verified with, or verify it again with these: '{short}'")
+    return problems
+
+
+# --- consistency (ADR-0006) -----------------------------------------------------------------------------------
+
+def symbol(text: str) -> str | None:
+    """The property symbol a quantity names (Ftu, Fty, ..., KIc, E), or None when it names none or several."""
+    found = {("KIc" if m.group(1) == "KIC" else m.group(1)) for m in SYMBOL.finditer(text)}
+    found |= {sym for rx, sym in PHRASE if rx.search(text)}
+    return found.pop() if len(found) == 1 else None
+
+
+def _unit_key(text: str) -> str:
+    """The units written at the start of ``text`` ('ksi', ' MPa', 'N/mm²'), normalised; '' when none is."""
+    m = UNIT.match(text)
+    if not m or NOT_UNIT_IN.match(text):
+        return ""
+    u = re.sub(r"[ \t ]", "", m.group(0).lower())
+    for a, b in (("^2", "2"), ("²", "2"), ("^3", "3"), ("³", "3"), ("deg", "°")):
+        u = u.replace(a, b)
+    return {"n/mm2": "mpa", "kips": "kip", "lbs": "lb", "um": "µm", "inch": "in", "inches": "in"}.get(u, u)
+
+
+def _comparable(unit_a: str, unit_b: str) -> bool:
+    """Two values can be compared as numbers: same units, or units not known on one side (PR #136 review: 1000 MPa
+    and 1 GPa are the same value, so values in different units are never called a clash)."""
+    return not unit_a or not unit_b or unit_a == unit_b
+
+
+def _rows(section_b: str) -> list[dict[str, Any]]:
+    """Section B's table rows (NOT VERIFIED rows left out) as {'quantity', 'symbol', 'value' (first number),
+    'written', 'unit' (from a units column, else written after the value), 'group' (quantity, conditions,
+    units...), 'cell'}."""
+    out: list[dict[str, Any]] = []
+    lines = [ln for ln in section_b.splitlines() if ln.strip().startswith("|")]
+    if len(lines) < 3 or not re.fullmatch(r"[\s|:-]+", lines[1]):
+        return out
+    head = [c.lower() for c in _cells(lines[0])]
+    qi = next((i for i, h in enumerate(head) if "quantity" in h), 1)
+    vi = head.index("value") if "value" in head else 2
+    gi = [i for i, h in enumerate(head) if i != qi and any(g in h for g in GROUP_HEADS)]
+    ui = next((i for i, h in enumerate(head) if "unit" in h), None)
+    for ln in lines[2:]:
+        if UNVERIFIED_LINE.search(ln):
+            continue
+        row = _cells(ln)
+        if vi >= len(row) or qi >= len(row):
+            continue
+        nums = numbers(row[vi])
+        if not nums:
+            continue
+        group = tuple(re.sub(r"\s+", " ", row[i].lower()).strip() for i in gi if i < len(row))
+        unit = _unit_key(row[ui].strip()) if ui is not None and ui < len(row) else ""
+        out.append({"quantity": row[qi], "symbol": symbol(row[qi]), "value": nums[0][0], "written": nums[0][3],
+                    "unit": unit or _unit_key(row[vi][nums[0][2]:]), "group": group, "cell": row[vi]})
+    return out
+
+
+def _bindings(prose: str) -> list[tuple[str, float, str, str, str]]:
+    """(symbol, value, as written, line, units written after it or '') for each 'Q = v' in prose lines that are not
+    NOT VERIFIED."""
+    out: list[tuple[str, float, str, str, str]] = []
+    for line in prose.splitlines():
+        if line.strip().startswith("|") or UNVERIFIED_LINE.search(line):
+            continue
+        for m in BINDING.finditer(line):
+            nums = numbers(line[m.end():m.end() + 30])
+            if nums and nums[0][1] == 0:
+                sym = "KIc" if m.group(1) == "KIC" else m.group(1)
+                out.append((sym, nums[0][0], nums[0][3], line.strip()[:100],
+                            _unit_key(line[m.end() + nums[0][2]:])))
+    return out
+
+
+def verified_bindings(entries: Iterable[Mapping[str, Any]]) -> list[tuple[float, str | None]]:
+    """(number, claimed property symbol or None) for each number a PASS value item of the session vouches for."""
+    entries = list(entries)
+    calls: dict[str, list[Any]] = {}
+    for ev in entries:
+        for b in _blocks(ev):
+            if b.get("type") == "tool_use" and VERIFY.search(str(b.get("name") or "")):
+                calls[str(b.get("id"))] = _list(_dict(b.get("input")).get("items"))
+    out: list[tuple[float, str | None]] = []
+    for ev in entries:
+        for b in _blocks(ev):
+            tid = str(b.get("tool_use_id"))
+            if b.get("type") != "tool_result" or tid not in calls or b.get("is_error"):
+                continue
+            try:
+                res = _dict(json.loads(_result_text(b)))
+            except ValueError:
+                continue
+            for k, raw in enumerate(_list(res.get("items"))):
+                item = _dict(raw)
+                if item.get("status") != "PASS" or str(item.get("kind") or "value") != "value":
+                    continue
+                given = _dict(calls[tid][k]) if k < len(calls[tid]) else {}
+                sym = symbol(str(given.get("quantity") or item.get("quantity") or ""))
+                for field in ("value", "source_value"):
+                    v = given.get(field, item.get(field))
+                    if v not in (None, ""):
+                        out += [(n, sym) for n, *_ in numbers(str(v))]
+    return out
+
+
+def inconsistencies(text: str, bindings: list[tuple[float, str | None]], inputs: str) -> list[str]:
+    """Where the answer disagrees with itself or with what was verified (empty when it does not)."""
+    sec = _sections(text)
+    packet = "A" in sec or "B" in sec
+    if NO_ANSWER.search(text.strip().split("\n", 1)[0]) or (packet and NO_ANSWER.search(
+            sec.get("A", "").strip().split("\n", 1)[0])):
+        return []
+    rows = _rows(sec.get("B", "")) if packet else []
+    prose = sec.get("A", "") if packet else text
+    given = [n for n, *_ in numbers(inputs)]
+    out: list[str] = []
+    claims = _bindings(prose)
+    for sym, v, written, _line, unit in claims:        # (i) section A against section B, in the same units
+        mine = [r for r in rows if r["symbol"] == sym and _comparable(unit, r["unit"])]
+        if mine and not any(_same(written, v, [r["value"]]) or _same(r["written"], r["value"], [v]) for r in mine):
+            out.append(f"section A gives {sym} = {written}, section B gives {sym} = "
+                       f"{', '.join(sorted({r['written'] for r in mine}))}")
+    seen: dict[tuple[Any, ...], dict[str, Any]] = {}
+    d_text = sec.get("D", "")
+    for r in rows:                                     # (ii) two rows, same quantity and conditions, two values
+        key = (r["symbol"] or r["quantity"].lower(), r["unit"], *r["group"])
+        first = seen.setdefault(key, r)
+        if first is r or math.isclose(first["value"], r["value"], rel_tol=1e-9, abs_tol=1e-12):
+            continue
+        if not all(re.search(r"(?<![\d.])" + re.escape(w) + r"(?![\d])", d_text) for w in (first["written"], r["written"])):
+            out.append(f"section B gives {r['quantity']} as {first['written']} and {r['written']} for the same "
+                       "conditions, and section D does not name the conflict (G3.4: report each with its source)")
+    for sym, v, written, _line, _unit in [*claims, *((r["symbol"], r["value"], r["written"], r["cell"], r["unit"])
+                                                     for r in rows)]:
+        if not sym or any(math.isclose(v, g, rel_tol=1e-9, abs_tol=1e-12) for g in given):
+            continue                                   # (iii) verified as another quantity
+        cover = [s for n, s in bindings if _same(written, v, [n])]
+        if cover and all(cover) and sym not in cover:
+            out.append(f"{written} is reported as {sym}, but it was verified as {', '.join(sorted(set(c for c in cover if c)))}")
+    return list(dict.fromkeys(out))
+
+
 # --- the hook decision ----------------------------------------------------------------------------------------
 
 def _subagent_transcripts(transcript: str) -> list[str]:
@@ -311,7 +620,8 @@ def _subagent_transcripts(transcript: str) -> list[str]:
 def decide(inp: Mapping[str, Any]) -> dict[str, Any] | None:
     """The hook's output for a Stop or SubagentStop input, or None to let the turn end silently."""
     text = str(inp.get("last_assistant_message") or "")
-    if not reported_values(text):                     # nothing reported: no transcript read (most turns)
+    packet = len(_sections(text)) >= 2
+    if not packet and not reported_values(text):      # nothing reported: no transcript read (most turns)
         return None
     sub = inp.get("hook_event_name") == "SubagentStop"
     if sub and inp.get("agent_type") != ERLA_AGENT:   # the hook entry also matches the Professor: its report is
@@ -321,22 +631,43 @@ def decide(inp: Mapping[str, Any]) -> dict[str, Any] | None:
     # are not among them (agent eval A01, 2026-11-02), so a turn found by promptId held no ERLA call. A session that
     # used ERLA is in scope for every answer, and every request in it holds inputs.
     entries = _read(main, ())
-    packet = len(_sections(text)) >= 2
     if not (sub or packet or _uses_erla(entries)):
         return None
     sources = entries + [e for p in ([] if sub else _subagent_transcripts(main))
                          for e in _read(p, ("verify_packet", "verification_id"))]
     inputs = "\n".join(t for t in map(_user_text, entries) if GATE_TAG not in t)   # never the gate's own feedback
     missing = unverified(text, verified_numbers(sources), inputs)
-    if not missing:
+    claims = unverified_claims(text, verified_claims(sources)) if packet else []
+    clashes = inconsistencies(text, verified_bindings(sources), inputs)
+    if not (missing or claims or clashes):
         return None
-    listed = "; ".join(f"{w} ({ctx})" for w, ctx in missing[:MAX_LISTED]) + (
-        f"; and {len(missing) - MAX_LISTED} more" if len(missing) > MAX_LISTED else "")
+
+    def listing(xs: list[str]) -> str:
+        return "; ".join(xs[:MAX_LISTED]) + (f"; and {len(xs) - MAX_LISTED} more" if len(xs) > MAX_LISTED else "")
+
+    listed = listing([f"{w} ({ctx})" for w, ctx in missing])
     if inp.get("stop_hook_active"):
-        return {"systemMessage": f"{GATE_TAG}: this answer reports value(s) that no verify_packet of this "
-                                 f"session passed: {listed}. Treat them as NOT VERIFIED."}
-    return {"decision": "block",
-            "reason": f"{GATE_TAG}: your answer reports value(s) that no PASS or COMPUTED verify_packet "
-                      f"item of this session covers: {listed}. Call verify_packet on each (MCP_MODE step 5) and "
-                      "restate the answer, or mark each one NOT VERIFIED on its line. A number the user gave as an "
-                      "input is exempt."}
+        said: list[str] = []
+        if missing:
+            said.append(f"this answer reports value(s) that no verify_packet of this session passed: {listed}. "
+                        "Treat them as NOT VERIFIED.")
+        if claims:
+            said.append(f"sentence(s) of section A are not backed by a cited source that code checked: "
+                        f"{listing(claims)}. Treat them as NOT VERIFIED.")
+        if clashes:
+            said.append(f"the answer contradicts itself or what was verified: {listing(clashes)}.")
+        return {"systemMessage": f"{GATE_TAG}: " + " ".join(said)}
+    parts: list[str] = []
+    if missing:
+        parts.append(f"your answer reports value(s) that no PASS or COMPUTED verify_packet item of this session "
+                     f"covers: {listed}. Call verify_packet on each (MCP_MODE step 5) and restate the answer, or mark "
+                     "each one NOT VERIFIED on its line. A number the user gave as an input is exempt.")
+    if claims:
+        parts.append(f"section A's citations: {listing(claims)}. Give each factual sentence of section A one to three "
+                     "[S#] tags listed under Citations, verify each tagged sentence with verify_packet kind 'claim' "
+                     "(text = the sentence without its tags, sources = [{doc_id, locator, tag}]) and show it exactly as "
+                     "verified, or label its line NOT VERIFIED (rules section 6).")
+    if clashes:
+        parts.append(f"the answer is not consistent: {listing(clashes)}. Correct the value or quantity, or report the "
+                     "conflict in section D with each source (G3.4).")
+    return {"decision": "block", "reason": f"{GATE_TAG}: " + " ".join(parts)}

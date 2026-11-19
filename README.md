@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.4-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-1.0.5-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 [![Status: production](https://img.shields.io/badge/status-production-brightgreen.svg)](#status)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
@@ -17,6 +17,16 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 1.0.5
+
+- **Sentence citations:** each factual sentence of an answer carries `[S#]` tags for the sources that support it,
+  and code checks that every number and named term in the sentence (alloy, temper, standard, direction, basis,
+  property symbol) is printed in those sources. A sentence with a swapped term is sent back.
+- **Self-consistency:** an answer whose summary disagrees with its values table, whose table gives two values for
+  the same conditions without naming the conflict, or that reports one property's value as another's is sent back.
+- **Not checked by code:** a sentence that reverses or negates its source's own words.
+- **Upgrade:** quit and reopen the Claude app. No re-index is needed.
+
 ### 1.0.4
 
 - **Fix:** after a document changes, semantic search now reliably waits for the next refresh instead of
@@ -29,15 +39,6 @@ Updated automatically at every release; older versions are listed under
   an upload) and commit messages are checked like the command itself.
 - **Web check, fewer false blocks:** version references, encoding and platform names, numbered commands and
   no-reply commit trailers no longer block; restricted names and codes still do.
-- **Upgrade:** quit and reopen the Claude app.
-
-### 1.0.2
-
-- **Web check, fewer false blocks:** a restricted document's placeholder title (such as "Document:") no longer
-  blocks ordinary words in a web search or browser call; its file name still does.
-- **Web check, one gap closed:** a restricted document's short number written with a hyphen or space is now
-  caught.
-- **Security:** a dependency updated for a published advisory.
 - **Upgrade:** quit and reopen the Claude app.
 
 <!-- release-notes:end -->
@@ -212,7 +213,7 @@ in a Claude Code session (desktop app **Code** tab or terminal), not in a claude
 <!-- public:begin status -->
 ## Status
 
-**Production (1.0.4).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
+**Production (1.0.5).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
 every value it reports against its cited source with `verify_packet`, which re-opens the source and checks
 the value in code. The server enforces this where it records a packet: `log_request` and `export_packet`
 refuse a packet that reports values unless a passed `verify_packet` check from the same server session

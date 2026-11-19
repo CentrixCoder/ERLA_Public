@@ -60,8 +60,8 @@ def register(verification_id: str, items: list[dict[str, Any]], results: list[di
     examined: list[float] = []
     seen: set[tuple[Any, ...]] = set()
     for item, res in zip(items, results):
-        if not isinstance(item, dict):
-            continue
+        if not isinstance(item, dict) or str(res.get("kind") or "") == "claim":
+            continue                     # a claim reports no value (ADR-0006): it never counts as a verified value
         if str(res.get("kind") or "value") != "quote":
             examined += _nums(item.get("value")) + _nums(item.get("source_value"))
         if res.get("status") not in COVERS:
@@ -75,7 +75,7 @@ def register(verification_id: str, items: list[dict[str, Any]], results: list[di
             continue
         seen.add(key)
         covered.append({"kind": kind, "status": res.get("status"), "nums": nums, "locator": loc})
-    statuses = [str(r.get("status")) for r in results]
+    statuses = [str(r.get("status")) for r in results]      # a failed or unconfirmed claim fails the run too
     _REGISTRY[verification_id] = {"overall": "FAIL" if "FAIL" in statuses or not results else
                                   "UNCONFIRMED" if "UNCONFIRMED" in statuses else "PASS",
                                   "index": index_stamp, "covered": covered, "examined": examined}

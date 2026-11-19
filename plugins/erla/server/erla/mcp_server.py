@@ -1137,7 +1137,11 @@ def build_server():
         "calc_output a calculation tool returned (checked against that run; scale 2 for a total from a half length, "
         "any other factor with the equation it comes from) "
         "or, when no tool applies, not_covered with the reason (listed as COMPUTED, not checked); a computed value with "
-        "neither FAILS. Returns per-item PASS/FAIL/UNCONFIRMED/COMPUTED with evidence and OCR/flag warnings, and a "
+        "neither FAILS; kind 'claim' checks a sentence of section A: text (without its [S#] tags) and sources "
+        "[{doc_id, locator, tag}] (1-3) - PASS when every number and term it names (alloy, temper, standard, direction, "
+        "basis, property symbol) is printed in the cited text (terms, not meaning), FAIL naming a term that is not, "
+        "UNCONFIRMED for a paraphrase code cannot check; supporting lists the cited sentences an ablation over the "
+        "re-ranker scores highest (display only). Returns per-item PASS/FAIL/UNCONFIRMED/COMPUTED with evidence and OCR/flag warnings, and a "
         "verification_id for log_request and export_packet, which refuse a packet that reports values without "
         "one issued by this server for those values. UNCONFIRMED: the number is on the page but no property "
         "record or table row confirms the row or column claimed for it - not verified.", ro)
