@@ -36,6 +36,16 @@ def run_chain(cfg: Config, *, full: bool = False, ocr_inline: bool = False, run_
     # new documents on a specialist's topic open a review trigger for its skill file
     summary["specialist_additions"] = specialists.open_addition_triggers(
         cfg, specialists.topic_additions(idx.con, before, since))
+    # R9.3 site facts (protocol review 2026-11-25, F5): a library composition change over
+    # library_change_trigger_pct, or a new Python runtime, opens a site_change trigger
+    try:
+        import platform
+        from .site import site_change_triggers
+        n_docs, n_bytes = idx.con.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM documents").fetchone()
+        summary["site_change"] = [t["reason"] for t in site_change_triggers(
+            cfg.agent_root, int(n_docs), round(int(n_bytes) / 1e9, 2), platform.python_version())]
+    except Exception as e:  # noqa: BLE001 - a trigger check never fails the refresh; it says why it did not run
+        summary["site_change"] = f"not checked: {type(e).__name__}: {e}"
     if run_ocr and cfg.ocr.enabled:
         phase("ocr")
         so = idx.run_ocr(limit=ocr_limit)

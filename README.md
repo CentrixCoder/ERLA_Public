@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml/badge.svg)](https://github.com/CentrixCoder/ERLA_Public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.5-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
+[![Version](https://img.shields.io/badge/version-1.0.6-blue)](https://github.com/CentrixCoder/ERLA_Public/releases/latest)
 [![Status: production](https://img.shields.io/badge/status-production-brightgreen.svg)](#status)
 
 **Find · Verify · Build.** ERLA is a Claude plugin that brings a growing team of specialized agents
@@ -17,6 +17,18 @@ Updated automatically at every release; older versions are listed under
 [Releases](https://github.com/CentrixCoder/ERLA_Public/releases).
 
 <!-- release-notes:start -->
+### 1.0.6
+
+- **Correct a document's details:** a document indexed with a weak title, a wrong year or the wrong authority tier
+  can be corrected in the site file `config/doc_overrides.yaml` (each entry keyed by the document's path in the
+  library and given a reason). Re-indexing keeps the correction; `erla reclassify --overrides-only` applies the
+  file to an existing index and changes no other document.
+- **Command line outside the desktop app (Windows):** ERLA's runtime and `erla` commands now work from an ordinary
+  terminal, not only from inside the Claude app. Installed runtimes are repaired on the next start.
+- **Protocol upkeep:** the instructions name every tool and command, review triggers open when the library or
+  runtime changes, and evaluation runs are compared only on the same question set.
+- **Upgrade:** quit and reopen the Claude app. No re-index is needed.
+
 ### 1.0.5
 
 - **Sentence citations:** each factual sentence of an answer carries `[S#]` tags for the sources that support it,
@@ -32,14 +44,6 @@ Updated automatically at every release; older versions are listed under
 - **Fix:** after a document changes, semantic search now reliably waits for the next refresh instead of
   sometimes answering from vectors of text that was removed.
 - **Upgrade:** quit and reopen the Claude app. No re-index is needed.
-
-### 1.0.3
-
-- **Web check, files a command sends:** a file whose contents a command sends (a pull-request description file,
-  an upload) and commit messages are checked like the command itself.
-- **Web check, fewer false blocks:** version references, encoding and platform names, numbered commands and
-  no-reply commit trailers no longer block; restricted names and codes still do.
-- **Upgrade:** quit and reopen the Claude app.
 
 <!-- release-notes:end -->
 
@@ -213,7 +217,7 @@ in a Claude Code session (desktop app **Code** tab or terminal), not in a claude
 <!-- public:begin status -->
 ## Status
 
-**Production (1.0.5).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
+**Production (1.0.6).** ERLA is tested and released through automated gates. Its instructions tell the agent to check
 every value it reports against its cited source with `verify_packet`, which re-opens the source and checks
 the value in code. The server enforces this where it records a packet: `log_request` and `export_packet`
 refuse a packet that reports values unless a passed `verify_packet` check from the same server session

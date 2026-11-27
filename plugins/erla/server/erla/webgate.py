@@ -219,7 +219,12 @@ def decide(payload: dict[str, Any]) -> str | None:
         if not analysis.empty:
             items = protected_paths(cfg)
             save_protected_cache(items)
-            reason = shellgate.write_reason(analysis, shellgate.Protected(items), cmd)
+            how = None
+            if analysis.refusal == "web-allow":
+                from .config import AGENT_ROOT
+                site = os.path.realpath(cfg.agent_root if cfg is not None else AGENT_ROOT)
+                how = shellgate.web_allow_command(sys.executable, site, sys.platform == "win32")
+            reason = shellgate.write_reason(analysis, shellgate.Protected(items), cmd, how=how)
             if reason:
                 _log(cfg, {"cmd": "hook.writecheck", "tool": tool, "verdict": "BLOCKED",
                            "agent_id": payload.get("agent_id")})

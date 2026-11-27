@@ -88,6 +88,33 @@ def cached_protected() -> list[tuple[str, str]] | None:
         return None
 
 
+def site_dir() -> str:
+    """The runtime's site folder: the one it cached for this ERLA_ROOT, else ERLA_ROOT, else the per-user default
+    (the same rule as erla.config.default_site_dir; tests/test_shellgate.py checks they agree)."""
+    try:
+        rec = json.loads(CACHE.read_text(encoding="utf-8"))
+        if rec.get("erla_root", "") == os.environ.get("ERLA_ROOT", ""):
+            return str(Path(rec["config"]).parent.parent)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    if os.environ.get("ERLA_ROOT"):
+        return os.path.expanduser(os.environ["ERLA_ROOT"])
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local"),
+                            "ERLA")
+    return os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share"),
+                        "erla")
+
+
+def web_allow_how(sg: ModuleType) -> str | None:
+    """The web-allow command for this computer: the runtime's Python and the site's physical folder (realpath: the
+    folder the desktop app's AppData redirection really wrote, which a terminal outside the app can open)."""
+    try:
+        return sg.web_allow_command(str(launch.VPY), os.path.realpath(site_dir()), sys.platform == "win32")
+    except Exception:
+        return None
+
+
 def local_decision(sg: ModuleType, payload: dict) -> str | None:
     """ALLOW, a deny reason, or None when the runtime must decide."""
     tool, inp = payload.get("tool_name"), payload.get("tool_input")
@@ -104,7 +131,8 @@ def local_decision(sg: ModuleType, payload: dict) -> str | None:
     if analysis.empty:
         return ALLOW
     if analysis.refusal:
-        return sg.write_reason(analysis, sg.Protected([]), cmd)
+        how = web_allow_how(sg) if analysis.refusal == "web-allow" else None
+        return sg.write_reason(analysis, sg.Protected([]), cmd, how=how)
     items = cached_protected()
     if items is None:
         return None

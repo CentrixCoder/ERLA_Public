@@ -486,18 +486,25 @@ def _engtools(action: str, tool_id: str = "") -> dict:
 
 
 def t_engtools_list() -> dict:
+    """Engineer Tools (ADR-0003; CLI `erla tools list`): the tools in the site's tools/ store with version, state,
+    last test and local URL. Read only; acceptance is the user's (panel or CLI), never a tool call."""
     return _engtools("list")
 
 
 def t_engtools_test(tool_id: str) -> dict:
+    """Engineer Tools (CLI `erla tools test <id>`): run the tool's own tests in its environment and record the
+    result against its current file hash (ET3: acceptance needs a passed test on that hash)."""
     return _engtools("test", tool_id)
 
 
 def t_engtools_start(tool_id: str) -> dict:
+    """Engineer Tools (CLI `erla tools start <id>`): start an accepted tool on 127.0.0.1 (ET2, ET4); refused when
+    it is not accepted or its files changed since acceptance. Only when the user starts it (G1.3)."""
     return _engtools("start", tool_id)
 
 
 def t_engtools_stop(tool_id: str) -> dict:
+    """Engineer Tools (CLI `erla tools stop <id>`): stop a running tool."""
     return _engtools("stop", tool_id)
 
 

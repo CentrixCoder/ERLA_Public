@@ -481,9 +481,13 @@ def record_calibration(cfg: Config, model_id: str, summary: dict[str, Any], sour
 
 
 def _open_model_trigger(cfg: Config, model_id: str) -> None:
-    """One protocol-review trigger per uncalibrated checker model (shown by site_info / protocol_status)."""
+    """One open protocol-review trigger per uncalibrated checker model (shown by site_info / protocol_status).
+    Protocol review 2026-11-25 (F15): the check was "the model id appears anywhere in the log", so once the
+    2026-10-18 trigger for claude-opus-5-5 was closed by a review, 107 later checks on that uncalibrated model
+    opened none. Now a trigger opens whenever none is open for the model."""
+    from .site import open_triggers
     p = cfg.log_dir / "protocol_review_log.jsonl"
-    if p.is_file() and f'"model_id": "{model_id}"' in p.read_text(encoding="utf-8", errors="replace"):
+    if any(t.get("trigger") == "model_change" and t.get("model_id") == model_id for t in open_triggers(p)):
         return
     safeio.append_jsonl(cfg, p, {"ts": _now(), "type": "trigger_open", "trigger": "model_change",
                                  "model_id": model_id,

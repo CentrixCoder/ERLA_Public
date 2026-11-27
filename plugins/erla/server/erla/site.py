@@ -62,6 +62,20 @@ class SiteError(ValueError):
     pass
 
 
+def _not_initialised(cfg_path: Path) -> SiteError:
+    """The "site not initialised" error, naming a site the Claude desktop app keeps in its private AppData copy when there
+    is one: run from a terminal outside the app, the default site folder is not the app's (2026-11-19), and
+    `erla init` there would start a second site that the app never reads."""
+    from .config import packaged_sites
+    here = os.path.normcase(str(cfg_path.parent.parent))
+    found = [p for p in packaged_sites() if os.path.normcase(str(p)) != here]
+    if found:
+        return SiteError(f"site not initialised: {cfg_path}. The Claude desktop app keeps its ERLA site at "
+                         f"{found[0]}: add --site \"{found[0]}\" to the command (or set ERLA_ROOT to it). Do not run "
+                         "erla init here: it would start a second site that the app does not use.")
+    return SiteError(f"site not initialised: {cfg_path}. Run erla init --browse first.")
+
+
 # --------------------------------------------------------------- detection
 def detect_tesseract() -> Path | None:
     found = shutil.which("tesseract")
@@ -94,6 +108,22 @@ def detect_office() -> dict[str, bool]:
         except OSError:
             pass
     return out
+
+
+def tesseract_version(tess: Path | None) -> str | None:
+    """The OCR engine's version for SITE_NOTES (R9.3 lists Tesseract among the site facts; protocol review
+    2026-11-25, F5: it was never recorded). None when it cannot be read within a few seconds."""
+    if not tess:
+        return None
+    import re
+    import subprocess
+    try:
+        out = subprocess.run([str(tess), "--version"], capture_output=True, text=True, timeout=10,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"tesseract\s+v?(\d+\.\d+(?:\.\d+)?)", (out.stdout or "") + (out.stderr or ""), re.I)
+    return m.group(1) if m else None
 
 
 def runtime_info() -> dict[str, Any]:
@@ -269,6 +299,7 @@ def write_site_notes(site: Path, cfg: dict, surv: dict | None, tess: Path | None
         "## Installed software",
         f"- Python {rt['python']} on {rt['platform']}",
         f"- PyMuPDF {rt.get('pymupdf')}",
+        f"- Tesseract {tesseract_version(tess) or 'version not read'}" if tess else "- Tesseract: not found",
         "- MS Office COM: " + (", ".join(k for k in ("word", "powerpoint", "excel") if office.get(k)) or "not available")
         + (" (legacy .doc/.ppt extraction enabled)" if cfg["legacy_office"]["enabled"] else " — legacy .doc/.ppt NOT indexed"),
         f"- Embeddings: {cfg['embeddings']['model']} (local; downloaded to `{site / 'models'}` on first `erla embed`)", "",
@@ -360,7 +391,7 @@ def set_library_roots(site: Path, library_roots: list[str | Path], reason: str =
     site = Path(site).expanduser().resolve()
     cfg_path = site / "config" / "library_config.yaml"
     if not cfg_path.is_file():
-        raise SiteError(f"site not initialised: {cfg_path}. Run erla init --browse first.")
+        raise _not_initialised(cfg_path)
     roots = _validate_roots(library_roots, site)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     old = list(raw.get("library_roots") or [])
@@ -389,7 +420,7 @@ def set_web_allow_terms(site: Path, add: list[str] | None = None, remove: list[s
     site = Path(site).expanduser().resolve()
     cfg_path = site / "config" / "library_config.yaml"
     if not cfg_path.is_file():
-        raise SiteError(f"site not initialised: {cfg_path}. Run erla init --browse first.")
+        raise _not_initialised(cfg_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     web_raw = raw.get("web")
     web: dict[str, Any] = web_raw if isinstance(web_raw, dict) else {}
@@ -428,7 +459,7 @@ def set_check_policy(site: Path, policy: str, reason: str = "user request") -> d
     site = Path(site).expanduser().resolve()
     cfg_path = site / "config" / "library_config.yaml"
     if not cfg_path.is_file():
-        raise SiteError(f"site not initialised: {cfg_path}. Run erla init --browse first.")
+        raise _not_initialised(cfg_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     check_raw = raw.get("check")
     check: dict[str, Any] = check_raw if isinstance(check_raw, dict) else {}
@@ -508,30 +539,14 @@ def review_status(site: Path) -> dict:
     site = Path(site)
     led = site / "PROTOCOL_REVIEW.md"
     status: dict[str, Any] = {"ledger": str(led), "exists": led.is_file(), "next_due": None,
-                              "overdue": None, "open_triggers": []}
+                              "overdue": None, "scheduled_overdue": None, "open_triggers": []}
     if led.is_file():
         import re
         m = re.search(r"Next scheduled review\*?\*?\s*\|\s*\*?\*?(\d{4}-\d{2}-\d{2})", led.read_text(encoding="utf-8"))
         if m:
             status["next_due"] = m.group(1)
-            status["overdue"] = date.fromisoformat(m.group(1)) < date.today()
-    log = site / "logs" / "protocol_review_log.jsonl"
-    if log.is_file():
-        opened, closed, closes = [], set(), []
-        for line in log.read_text(encoding="utf-8").splitlines():
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if r.get("type") == "trigger_open":
-                opened.append(r)
-            elif r.get("type") == "review":
-                closed.add(r.get("ts", ""))
-            elif r.get("type") == "trigger_close":
-                closes.append(r)
-        last_review = max(closed) if closed else ""
-        status["open_triggers"] = [t for t in opened if t.get("ts", "") > last_review
-                                   and not any(_closes(c, t) for c in closes)]
+            status["overdue"] = status["scheduled_overdue"] = date.fromisoformat(m.group(1)) < date.today()
+    status["open_triggers"] = open_triggers(site / "logs" / "protocol_review_log.jsonl")
     # R9.3 (2026-11-16): an open trigger older than TRIGGER_MAX_DAYS makes the review overdue, so a backlog of
     # unpromoted lessons is reported like a missed scheduled review instead of sitting unread (45 triggers,
     # oldest 21 days, found 2026-11-16; master-ai-skills LL-0045 recurrence)
@@ -541,10 +556,38 @@ def review_status(site: Path) -> dict:
     status["triggers_overdue"] = bool(ages) and max(ages) > TRIGGER_MAX_DAYS
     if status["triggers_overdue"]:
         status["overdue"] = True
+    # protocol review 2026-11-25 (F7): 'overdue' merges the two causes, so it showed true next to a next_due in
+    # the future; scheduled_overdue (R9.2: a full review) and triggers_overdue (R9.3: a targeted review of the
+    # affected files) are reported apart, and overdue_reason names the cause(s)
+    status["overdue_reason"] = ([r for r, on in (("scheduled", status["scheduled_overdue"]),
+                                                 ("trigger_age", status["triggers_overdue"])) if on] or None)
     return status
 
 
 TRIGGER_MAX_DAYS = 14   # R9.3: an open trigger is reviewed within this many days
+
+
+def open_triggers(log: Path) -> list[dict[str, Any]]:
+    """The triggers of a protocol_review_log.jsonl that no later 'review' record or matching 'trigger_close' ended.
+    Shared by review_status and the code that opens a trigger only when none is open (checkgate model_change)."""
+    if not log.is_file():
+        return []
+    opened, closed, closes = [], set(), []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        if r.get("type") == "trigger_open":
+            opened.append(r)
+        elif r.get("type") == "review":
+            closed.add(r.get("ts", ""))
+        elif r.get("type") == "trigger_close":
+            closes.append(r)
+    last_review = max(closed) if closed else ""
+    return [t for t in opened if t.get("ts", "") > last_review and not any(_closes(c, t) for c in closes)]
 
 
 def _closes(close: dict, trig: dict) -> bool:
@@ -553,3 +596,83 @@ def _closes(close: dict, trig: dict) -> bool:
     if trig.get("ts", "") > close.get("ts", ""):
         return False
     return all(trig.get(k) == close[k] for k in ("trigger", "file", "specialist") if close.get(k))
+
+# ------------------------------------------------------------------ R9.3 site facts (protocol review 2026-11-25, F5)
+# Before 1.0.6 no code compared the library with its last measurement: the key
+# protocol_review.library_change_trigger_pct was written at init and read nowhere, so a library that grew from
+# 3,659 to 4,155 indexable files (+13.6 %) and a runtime that moved from Python 3.14.4 to 3.13.13 opened no
+# site_change trigger. The refresh chain now calls site_change_triggers after indexing.
+def composition_baseline(site: Path) -> dict[str, Any] | None:
+    """The library size last measured: the last ``resurvey`` record of the review log, else SITE_NOTES' total row."""
+    import re
+    site = Path(site)
+    best: dict[str, Any] | None = None
+    log = site / "logs" / "protocol_review_log.jsonl"
+    if log.is_file():
+        for line in log.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(r, dict) and r.get("type") == "resurvey" and r.get("indexable_files"):
+                best = {"files": int(r["indexable_files"]), "gb": r.get("indexable_gb"),
+                        "measured": str(r.get("ts", ""))[:10], "source": "resurvey"}
+    if best:
+        return best
+    notes = site / "SITE_NOTES.md"
+    if notes.is_file():
+        text = notes.read_text(encoding="utf-8")
+        m = re.search(r"\*\*Indexable total\*\*\s*\|\s*\*\*([\d,]+)\*\*\s*\|\s*\*\*([\d.]+)\*\*", text)
+        if m:
+            d = re.search(r"Library composition \(measured (\d{4}-\d{2}-\d{2})\)", text)
+            return {"files": int(m.group(1).replace(",", "")), "gb": float(m.group(2)),
+                    "measured": d.group(1) if d else "", "source": "SITE_NOTES.md"}
+    return None
+
+
+def _change_pct(site: Path) -> float:
+    from .config import DEFAULT_CONFIG
+    try:
+        raw = yaml.safe_load((site / DEFAULT_CONFIG.parent.name / DEFAULT_CONFIG.name).read_text(encoding="utf-8"))
+        return float(((raw or {}).get("protocol_review") or {}).get("library_change_trigger_pct", 10))
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        return 10.0
+
+
+def site_change_triggers(site: Path, files_now: int, gb_now: float | None = None,
+                         python_now: str | None = None) -> list[dict[str, Any]]:
+    """Open the R9.3 ``site_change`` triggers the measured site facts call for: the indexable file count or size
+    moved more than ``library_change_trigger_pct`` from the last measurement, or the Python runtime differs from
+    the one SITE_NOTES records. One open trigger per reason: it is not reopened until a review closes it."""
+    import re
+    site = Path(site)
+    opened: list[dict[str, Any]] = []
+    try:
+        already = {t.get("reason") for t in review_status(site)["open_triggers"] if t.get("trigger") == "site_change"}
+    except (OSError, ValueError):
+        already = set()
+    base = composition_baseline(site)
+    if base and base["files"] > 0 and "library_composition" not in already:
+        pct = _change_pct(site)
+        d_files = 100.0 * (files_now - base["files"]) / base["files"]
+        d_gb = (100.0 * (gb_now - float(base["gb"])) / float(base["gb"])
+                if gb_now is not None and base.get("gb") else None)
+        if abs(d_files) > pct or (d_gb is not None and abs(d_gb) > pct):
+            size = f", size {d_gb:+.1f} %" if d_gb is not None else ""
+            opened.append({"type": "trigger_open", "trigger": "site_change", "reason": "library_composition",
+                           "file": "SITE_NOTES.md", "baseline": base, "files_now": files_now, "gb_now": gb_now,
+                           "detail": f"library composition changed {d_files:+.1f} % in indexable files{size} "
+                                     f"({base['files']:,} measured {base['measured'] or 'at init'} -> {files_now:,}), "
+                                     f"over library_change_trigger_pct {pct:g}: run site_resurvey and review "
+                                     "SITE_NOTES.md"})
+    notes = site / "SITE_NOTES.md"
+    if python_now and notes.is_file() and "runtime_version" not in already:
+        m = re.search(r"^- Python (\S+)", notes.read_text(encoding="utf-8"), re.M)
+        if m and m.group(1) != python_now:
+            opened.append({"type": "trigger_open", "trigger": "site_change", "reason": "runtime_version",
+                           "file": "SITE_NOTES.md",
+                           "detail": f"Python {python_now} runs ERLA; SITE_NOTES.md records Python {m.group(1)}: "
+                                     "run site_resurvey"})
+    for rec in opened:
+        _log(site, rec)
+    return opened

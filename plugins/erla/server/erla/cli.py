@@ -514,17 +514,20 @@ def cmd_reclassify(a) -> int:
     cfg = _cfg()
     out_dir = cfg.out_dir
     stamp = time.strftime("%Y-%m-%d")
-    out_csv = out_dir / f"reclassify_{'dryrun_' if a.dry_run else ''}{stamp}.csv"
+    only = bool(getattr(a, "overrides_only", False))
+    out_csv = out_dir / (f"reclassify_{'dryrun_' if a.dry_run else ''}{'overrides_' if only else ''}{stamp}.csv")
+    opts = {"agent_root": cfg.agent_root, "only_overrides": only}   # F13: the site's doc_overrides.yaml
     if a.dry_run:
         con = _con(cfg, write=False)
-        st = reclassify.reclassify(con, write=False, out_csv=out_csv, guard=cfg, log=_out)
+        st = reclassify.reclassify(con, write=False, out_csv=out_csv, guard=cfg, log=_out, **opts)
     else:
         lock = _lock_path(cfg)
         if not _acquire_refresh_lock(lock):
             sys.exit(f"refresh running (lock {lock}, {_read_lock(lock)}); run `erla reclassify` after it finishes")
         try:
             con = _con(cfg, write=True)
-            st = reclassify.reclassify(con, write=True, out_csv=out_csv, guard=cfg, log=_out, heartbeat=_make_heartbeat(lock))
+            st = reclassify.reclassify(con, write=True, out_csv=out_csv, guard=cfg, log=_out,
+                                       heartbeat=_make_heartbeat(lock), **opts)
         finally:
             safeio.unlink_at(lock)
     _out(f"changes: {out_csv}")
@@ -927,6 +930,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("reclassify", help="K3: re-apply authority-tier and doc-type rules to indexed documents")
     s.add_argument("--dry-run", action="store_true", help="read-only: report changes to out/reclassify_dryrun_<date>.csv")
+    s.add_argument("--overrides-only", action="store_true",
+                   help="apply only the site's config/doc_overrides.yaml (title, year, tier per document); "
+                        "no other document is re-classified")
     s.set_defaults(fn=cmd_reclassify)
 
     s = sub.add_parser("convert", help="unit conversion with factor (A4), e.g. erla convert 72 ksi MPa")

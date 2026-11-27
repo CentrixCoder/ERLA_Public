@@ -8,7 +8,8 @@ an agent reads its compact index first and then only the sections the task needs
   section(path, "S8")                one skill block;  a rule, lesson or workflow id the same way
                                      (prefixed ids such as "XX-S8" too);  "5" or "§5" a whole section
 
-Works on any protocol file with '## N.' sections and '**ID ...**' / '- **ID ...**' blocks.
+Works on any protocol file with '## N.' sections and '**ID ...**' / '- **ID ...**' / '### ID' blocks, and on
+files whose level-2 headings are ids ('## S16.' in skills.md, '## G8.' in guardrails.md).
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from pathlib import Path
 from .edition import render
 
 SECTION = re.compile(r"^## (\d+)\.", re.M)
-BLOCK_HEAD = re.compile(r"^(?:- )?\*\*((?:[A-Z]+-)?[A-Z]{1,2}\d+)\b|^### ((?:[A-Z]+-)?[A-Z]{1,2}\d+)\b")
+BLOCK_HEAD = re.compile(r"^(?:- )?\*\*((?:[A-Z]+-)?[A-Z]{1,2}\d+)\b|^### ((?:[A-Z]+-)?[A-Z]{1,2}\d+)\b"
+                        r"|^## ((?:[A-Z]+-)?[A-Z]{1,2}\d+)\.")   # '## S16.', '## G8.' (protocol review 2026-11-25, F3)
 
 
 def _sections(text: str) -> list[tuple[str, int, int]]:
@@ -42,7 +44,7 @@ def _blocks(text: str) -> dict[str, str]:
         m = BLOCK_HEAD.match(line)                    # '### XX-S0 ...' headings are blocks too (lesson
         if m or line.startswith("#"):                  # 2026-10-13: protocol_section missed the S0 checklist)
             flush()
-            cur, buf = (m.group(1) or m.group(2), [line]) if m else (None, [])
+            cur, buf = (m.group(1) or m.group(2) or m.group(3), [line]) if m else (None, [])
             continue
         if cur is not None:
             if line.startswith("- ") and buf and buf[0].startswith("- "):

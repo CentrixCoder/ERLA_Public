@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import props, refs, safeio, store, tables, xcache
+from . import overrides, props, refs, safeio, store, tables, xcache
 from .classify import (UNKNOWN, classify_document, copy_group_flags, detect_markings, detect_standard, guess_year,
                        most_restrictive, unread_flag)
 from .config import Config
@@ -336,6 +336,9 @@ class Indexer:
         std, rev = detect_standard(f"{path.name}\n{title}\n{head[:3000]}")
         year = meta.get("year") or guess_year(path.name, title, head[:2000])
         cls = classify_document(rel, ext, title, head)
+        # F13: the owner's per-document corrections (site config/doc_overrides.yaml) win over the inferred values
+        title, year, cls["authority_tier"] = overrides.load(self.cfg.agent_root).apply(
+            rel, title, year, cls["authority_tier"])
         sh = prep.simhash
         cur = con.execute(
             """INSERT INTO documents(path, rel_path, sha256, simhash, size, mtime, ext, title, authors, year,
@@ -421,6 +424,7 @@ class Indexer:
         tail = "\n".join(texts[-2:]) if len(texts) > 2 else ""
         flag = self.cfg.path_flag(rel) or detect_markings(head, tail) or d["classification_flag"]
         cls = classify_document(rel, d["ext"] or path.suffix.lower().lstrip("."), d["title"] or path.stem, head)
+        cls["authority_tier"] = overrides.load(self.cfg.agent_root).get(rel).get("tier", cls["authority_tier"])
         rows = [(int(c["chunk_id"]), c["text"]) for c in chunks]
         fv = store.fts_version(con)
         store.fts_delete(con, rows, d["title"], d["path"], d["rel_path"], fv)

@@ -34,6 +34,7 @@ import binascii
 import os
 import posixpath
 import re
+import shlex
 from collections.abc import Iterable, Mapping
 from typing import cast
 
@@ -736,13 +737,27 @@ def analyse(command: str, cwd: str | None, env: Mapping[str, str] | None = None,
     return res
 
 
-def write_reason(analysis: Analysis, protected: Protected, command: str) -> str | None:
+def web_allow_command(python: str, site: str, windows: bool) -> str:
+    """The `erla web-allow` command a person can paste into their own terminal on this computer.
+
+    A plugin user has no `erla` on PATH, and the Claude desktop app keeps the site in a folder that a terminal
+    outside the app sees elsewhere (2026-11-19), so the command names the runtime's Python and the site's
+    physical folder. -P: the current folder never shadows the installed package. PowerShell needs `&` to run a
+    quoted path."""
+    if windows:
+        return f'& "{python}" -P -m erla.cli web-allow --add "<term>" --site "{site}"'
+    return f"{shlex.quote(python)} -P -m erla.cli web-allow --add '<term>' --site {shlex.quote(site)}"
+
+
+def write_reason(analysis: Analysis, protected: Protected, command: str, how: str | None = None) -> str | None:
     """The deny reason when the analysed command writes into a protected path, changes the web allowlist,
-    or writes somewhere unresolved while naming a protected path; else None."""
+    or writes somewhere unresolved while naming a protected path; else None. ``how``: the web-allow command
+    for this computer (``web_allow_command``), named in that refusal when the caller knows it."""
     if analysis.refusal == "web-allow":
         return ("ERLA write guard (G2): this command was not run because it changes the web gate's allowlist "
                 "(web.allow_terms). That is the user's decision: ask the user to run `erla web-allow` in their own "
-                "terminal if they want the term allowed.")
+                "terminal if they want the term allowed."
+                + (f" On this computer that command is: {how}" if how else ""))
     if analysis.refusal:
         return _reason(analysis.refusal, None)
     hit = protected.hit(analysis.paths)

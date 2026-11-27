@@ -94,6 +94,55 @@ def venv_healthy() -> bool:
     return bool(m) and Path(m.group(1)).is_dir()
 
 
+def physical_path(path: str) -> str | None:
+    """Where a file the Claude desktop app redirected really is; None when it is not redirected.
+
+    The desktop app on Windows is an MSIX package. A file that a process started from the app writes under
+    %APPDATA% or %LOCALAPPDATA% (uv's own Python, the ERLA site) lands in %LOCALAPPDATA%\\Packages\\<app>\\
+    LocalCache\\..., and only processes started from the app see it at the path they wrote. Windows' own
+    final-path lookup (os.path.realpath) names the physical file there, so no folder is guessed (2026-11-19)."""
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return None
+    packages = os.path.normcase(os.path.join(local, "Packages")) + os.sep
+    try:
+        real = os.path.realpath(path)
+    except (OSError, ValueError):
+        return None
+    if os.path.normcase(real).startswith(packages) and not os.path.normcase(os.path.abspath(path)).startswith(packages):
+        return real
+    return None
+
+
+def repair_venv_home() -> bool:
+    """Point the runtime venv at the physical folder of its base Python when the app redirected it.
+
+    Built from inside the app, pyvenv.cfg recorded the redirected path, so the runtime (and its erla.exe, which
+    the web gate tells the user to run) failed in every terminal outside the app with "did not find executable".
+    The physical folder holds the same files, so the runtime works in both places; no reinstall. Only the
+    ``home`` line changes, written atomically. True when the file changed."""
+    cfg = VENV / "pyvenv.cfg"
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    m = re.search(r"^home\s*=\s*(.+?)\s*$", text, re.M)
+    real = physical_path(m.group(1)) if m else None
+    if m is None or real is None or not Path(real, "python.exe").is_file():
+        return False
+    tmp = cfg.with_name("pyvenv.cfg.tmp")
+    try:
+        tmp.write_text(text[:m.start(1)] + real + text[m.end(1):], encoding="utf-8")
+        os.replace(tmp, cfg)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def installed_ok() -> bool:
     if not (STAMP.is_file() and venv_healthy()):
         return False
@@ -176,6 +225,8 @@ def install(echo: bool = True) -> int:
             return 3
         if not venv_healthy():                  # missing, or its base Python was removed
             subprocess.run([sys.executable, "-m", "venv", "--clear", str(VENV)], check=True)
+        if repair_venv_home():                  # built from inside the desktop app: usable outside it too
+            _log("runtime venv now points at its base Python's physical folder", echo)
         # -c: the dependency versions of uv.lock (built into server/constraints.txt by packaging/build.py), not
         # whatever PyPI has on the day of the install (F-06); lines whose markers do not match this Python or
         # platform are ignored by pip
@@ -225,6 +276,12 @@ def main(argv: list[str]) -> int:
     if "--install" in argv:
         return install(echo="--quiet" not in argv)
     DATA.mkdir(parents=True, exist_ok=True)
+    if not install_running():
+        try:
+            if repair_venv_home():              # a runtime installed before this fix: repaired in place
+                _log("runtime venv now points at its base Python's physical folder", False)
+        except Exception:                       # never let the repair stop the server from starting
+            pass
     if installed_ok() and not install_running():
         return subprocess.call(server_cmd(), env=server_env(), cwd=str(DATA))
     if sys.version_info >= MIN_PY and not install_running():

@@ -10,7 +10,7 @@ Before anything else, check that ERLA is reachable from this chat (ERLA's server
 - Linked (or local) but the erla tools are absent or `site_info` errors → check the ERLA plugin is enabled (Settings → Plugins), then point to `/erla:setup`.
 - Never answer library questions from memory.
 
-Use the `erla` subagent to run workflow W6 (rules §9, skill S16). Scope: $ARGUMENTS (default: full review if the scheduled review is due, otherwise the documents affected by open triggers; state which).
+Use the `erla` subagent to run workflow W6 (rules §9, skill S16). Scope: $ARGUMENTS (default: full review if `next_due` has passed (`protocol_status` → `site_review.scheduled_overdue`); otherwise the documents affected by open triggers: an old trigger (`triggers_overdue`) makes the review overdue but does not widen it to a full review; state which).
 1. Gather evidence with `protocol_status`, `site_info`, `library_stats` and `run_eval` (compare with the last recorded run; an MRR or Recall@10 drop > 0.05 is a finding).
 2. Review the protocol resources (`erla://protocols/*`, including MCP_MODE) and `erla://site/notes` against the S16 checklist, including that the tool table in MCP_MODE matches the server's tools and that the plugin commands (`/erla:find`, `/erla:files`, `/erla:index`, `/erla:protocol-review`, `/erla:setup`) match the procedure.
 3. External currency checks (standard revisions) only with queries that `web_query_check` returns SAFE; web budget per G8.2.

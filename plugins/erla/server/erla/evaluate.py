@@ -366,7 +366,7 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
     if hist.is_file():                    # the last run on the same questions: a delta against another set means nothing
         for line in reversed(hist.read_text(encoding="utf-8").strip().splitlines()):
             rec = json.loads(line) if line.strip() else None
-            if isinstance(rec, dict) and rec.get("golden") == result["golden"]:
+            if isinstance(rec, dict) and rec.get("golden") == result["golden"] and _same_set(rec, result):
                 prev = rec
                 break
     if prev:
@@ -380,6 +380,51 @@ def run_eval(con, cfg: Config, golden: Path, hybrid: bool = True, rerank: bool |
 
 
 RUNS = "eval_runs.jsonl"   # each recorded run reduced by evidence_run (no query text, no titles), for compare_last
+REGRESSION_DROP = 0.05     # rules R9.3: a drop of more than this in nDCG@10, Recall@10 or MRR is a regression
+
+
+def _same_set(rec: dict, result: dict) -> bool:
+    """Whether a recorded run was measured on the same golden questions as this one: the same golden_sha256, or,
+    for a record from before the hash was kept, the same question count. A path alone is not enough: the file at a
+    path can be replaced (2026-11-25: eval/golden_queries.yaml went from 3 to 36 questions, and delta_* compared
+    the 36-question run with the 3-question one)."""
+    if rec.get("golden_sha256") and result.get("golden_sha256"):
+        return rec["golden_sha256"] == result["golden_sha256"]
+    return rec.get("n") == result.get("n")
+
+
+def _last_history_run(cfg: Config, result: dict) -> dict | None:
+    """The unpaired fallback of compare_last (protocol review 2026-11-25, F6). Runs recorded before
+    logs/eval_runs.jsonl existed sit only in eval_history.jsonl, without golden_sha256 or per-question rows, so
+    compare_last said "no earlier recorded run" while run_eval's delta_* compared with such a run on the same
+    golden path. Fall back to the last history run on the same golden path whose hash is unknown or equal: its
+    summary deltas, no paired interval, and `regression` by the R9.3 drop threshold."""
+    hist = Path(cfg.log_dir) / "eval_history.jsonl"
+    if not result.get("golden") or not hist.is_file():
+        return None
+    prev = None
+    for line in reversed(hist.read_text(encoding="utf-8").splitlines()):
+        try:
+            rec = json.loads(line) if line.strip() else None
+        except ValueError:
+            continue
+        if (isinstance(rec, dict) and rec.get("golden") == result["golden"] and rec.get("ts") != result.get("ts")
+                and _same_set(rec, result)):
+            prev = rec
+            break
+    if prev is None:
+        return None
+    deltas = {m: round(result[m] - prev[m], 3) for m in ("recall@10", "mrr", "ndcg@10")
+              if isinstance(result.get(m), (int, float)) and isinstance(prev.get(m), (int, float))}
+    regressed = [m for m, d in deltas.items() if d < -REGRESSION_DROP]
+    same = "the same golden file" if prev.get("golden_sha256") else "the same golden path (file hash not recorded)"
+    return {"base": prev.get("ts"), "paired": False, "delta": deltas, "regression": bool(regressed),
+            "regressed": regressed,
+            "settings_changed": sorted(k for k in ("settings", "hybrid", "reranker", "intent")
+                                       if k in prev and prev.get(k) != result.get(k)),
+            "note": f"unpaired: the base run on {same} predates per-question records, so these are summary "
+                    f"differences with no 95% interval; regression = a drop of more than {REGRESSION_DROP} (R9.3). "
+                    "This run is saved for a paired comparison next time"}
 
 
 def compare_last(cfg: Config, result: dict) -> dict:
@@ -403,6 +448,9 @@ def compare_last(cfg: Config, result: dict) -> dict:
                 break
     safeio.append_text_at(path, json.dumps(run, default=str) + "\n")
     if prev is None:
+        old = _last_history_run(cfg, result)
+        if old is not None:
+            return old
         return {"base": None, "note": "no earlier recorded run on this golden set; this run is saved for the next one"}
     cmp = compare_runs(prev, run)
     regressed = [m for m in METRICS if isinstance(cmp.get(m), dict) and cmp[m].get("ci95")

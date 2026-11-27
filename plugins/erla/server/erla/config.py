@@ -41,6 +41,21 @@ def default_site_dir() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "erla"
 
 
+def packaged_sites() -> list[Path]:
+    """ERLA sites written from inside an MSIX-packaged app (the Claude desktop app on Windows), at their physical
+    folder ``%LOCALAPPDATA%\\Packages\\<app>\\LocalCache\\Local\\ERLA``. The app redirects AppData writes there; a
+    terminal outside the app sees ``%LOCALAPPDATA%\\ERLA`` empty or different (2026-11-19). Only named in
+    messages: site resolution itself is unchanged."""
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return []
+    try:
+        return sorted(p.parent.parent for p in Path(local, "Packages").glob("*/LocalCache/Local/ERLA/config/"
+                                                                            "library_config.yaml"))
+    except OSError:
+        return []
+
+
 def resolve_agent_root() -> Path:
     env = os.environ.get("ERLA_ROOT")
     if env:
